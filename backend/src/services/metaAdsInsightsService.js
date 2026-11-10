@@ -87,10 +87,10 @@ export async function listEligibleAccounts(brandId) {
   await assertBrand(brandId);
   const accounts = await callAppsScript('brandList', undefined, { deadline: Date.now() + 52000 });
   const mine = (accounts || []).filter((a) => Number(a.atlasBrandId) === Number(brandId));
-  return ACCOUNT_TYPES.map((type) => ({
-    accountType: type,
-    registered: mine.some((a) => (a.type || 'MAIN').toUpperCase() === type),
-  }));
+  return ACCOUNT_TYPES.map((type) => {
+    const ofType = mine.filter((a) => (a.type || 'MAIN').toUpperCase() === type);
+    return { accountType: type, registered: ofType.length > 0, accountIds: ofType.map((a) => String(a.id ?? '')).filter(Boolean) };
+  });
 }
 
 // Queues a background run in Apps Script for one month (the current month is
@@ -98,20 +98,215 @@ export async function listEligibleAccounts(brandId) {
 // month at age × gender × day grain outlives Vercel's 60s function limit, so
 // Apps Script only enqueues (one-off trigger) and answers immediately; the
 // run reports its own progress through the ingest endpoints below.
-export async function requestFetch({ brandId, accountType, month }) {
+//
+// Each press is kept (migration 064) so anyone on the brand can follow it
+// through getFetchStatus; pressing again while the same month is still
+// being pulled returns that pull instead of queueing it twice.
+export async function requestFetch({ brandId, accountType, month, userId }) {
   await assertBrand(brandId);
   assertAccountType(accountType);
+  const running = (await getFetchStatus(brandId)).jobs
+    .find((j) => j.active && j.accountType === accountType && j.month === month);
+  if (running) return { reused: true, job: running };
+
   const eligible = (await listEligibleAccounts(brandId)).find((a) => a.accountType === accountType);
   if (!eligible?.registered) {
     throw new AppError(
       `Brand ini belum punya akun ${accountType} di Meta Ads Automation › Brand & Langganan`, 409,
     );
   }
-  return callAppsScript(
+  const queued = await callAppsScript(
     'metaAdsEnqueue',
     { atlasBrandId: brandId, type: accountType, month },
     { deadline: Date.now() + 52000 },
   );
+  const range = pullRange(month);
+  try {
+    await repo.insertFetchRequest({
+      brandId, accountType, month, rangeStart: range.startDate, rangeEnd: range.endDate,
+      accountIds: eligible.accountIds.length ? eligible.accountIds : ['?'],
+      queuedItems: Number.isFinite(Number(queued?.queued)) ? Number(queued.queued) : null, userId,
+    });
+  } catch (err) {
+    // Before migration 064 the pull still runs; only its progress is not followed.
+    if (err.code !== '42P01') throw err;
+  }
+  const job = (await getFetchStatus(brandId)).jobs.find((j) => j.accountType === accountType && j.month === month) ?? null;
+  return { ...queued, job };
+}
+
+// ---------------------------------------------------------------------
+// Progress of "Tarik sekarang"
+//
+// A press is followed through four steps, read from what has already
+// happened rather than reported by Apps Script:
+//   queued    — waiting in the shared Apps Script queue (no run yet);
+//   fetching  — runs have started: the days pulled so far against the
+//               month's days x the brand's accounts of that type;
+//   filing    — every day is in; the month's file is being written to the
+//               Performance Database (Apps Script calls /library last);
+//   done      — that file was written after the last run finished (or a
+//               hand-uploaded file keeps the month, which is said instead).
+// A run that never reports back, or a queue that never starts, ends the
+// press as failed after a while, so nothing spins forever.
+// ---------------------------------------------------------------------
+const STALE_RUN_MS = 15 * 60 * 1000;
+const QUEUE_GIVE_UP_MS = 20 * 60 * 1000;
+const FILING_GRACE_MS = 3 * 60 * 1000;
+
+// The days a pull covers: the month, up to yesterday (Jakarta) for the running month.
+function pullRange(month) {
+  const { startDate, endDate } = monthBounds(month);
+  const yesterday = new Date(Date.now() + 7 * 3600 * 1000 - 86400000).toISOString().slice(0, 10);
+  if (endDate <= yesterday) return { startDate, endDate };
+  return { startDate, endDate: yesterday < startDate ? startDate : yesterday };
+}
+const daysBetween = (a, b) => dayDiff(a, b) + 1;
+function eachDay(start, end) {
+  const out = [];
+  for (let t = Date.parse(`${start}T00:00:00Z`), last = Date.parse(`${end}T00:00:00Z`); t <= last; t += 86400000) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+async function jobStatus(brandId, req, now) {
+  const requestedAt = new Date(req.requested_at);
+  // A little slack: Apps Script may log the run a moment before ATLAS saved the press.
+  const runs = await repo.listRunsSince({
+    brandId, accountType: req.account_type, month: req.month, since: new Date(requestedAt.getTime() - 15000),
+  });
+  const accounts = Math.max(1, (req.account_ids ?? []).length);
+  const rangeDays = daysBetween(req.range_start, req.range_end);
+  const totalDays = rangeDays * accounts;
+
+  const isStale = (r) => r.status === 'running' && now - new Date(r.started_at).getTime() > STALE_RUN_MS;
+  const live = runs.filter((r) => r.status === 'running' && !isStale(r));
+  const progress = await repo.ingestedSoFar({
+    brandId, accountType: req.account_type, runIds: live.map((r) => r.fetch_run_id),
+    startDate: req.range_start, endDate: req.range_end,
+  });
+
+  // Days done, per account: a finished run counts its whole range; a running
+  // one the days it has written so far.
+  const done = new Set();
+  let partial = 0;
+  let rows = 0;
+  for (const r of runs) {
+    if (r.status === 'success') {
+      for (const d of eachDay(r.range_start, r.range_end)) {
+        if (d >= req.range_start && d <= req.range_end) done.add(`${r.ad_account_id}|${d}`);
+      }
+      rows += r.row_count ?? 0;
+    } else if (r.status === 'running' && !isStale(r)) {
+      const p = progress.get(r.fetch_run_id);
+      partial += Math.min(p?.days ?? 0, daysBetween(r.range_start, r.range_end));
+      rows += p?.rows ?? 0;
+    }
+  }
+  const daysDone = Math.min(done.size + partial, totalDays);
+  const failed = runs.filter((r) => r.status === 'failed' || isStale(r));
+  const lastFinish = runs.reduce((t, r) => (r.finished_at && new Date(r.finished_at) > t ? new Date(r.finished_at) : t), new Date(0));
+  const firstStart = runs.length ? new Date(runs[0].started_at) : null;
+
+  let phase;
+  let note = null;
+  let files = [];
+  if (failed.length) {
+    phase = 'failed';
+    const f = failed[failed.length - 1];
+    note = f.status === 'failed' ? (f.note || 'Meta atau Apps Script mengembalikan error.') : 'Apps Script berhenti di tengah penarikan dan tidak melapor balik.';
+  } else if (!runs.length) {
+    phase = now - requestedAt.getTime() > QUEUE_GIVE_UP_MS ? 'failed' : 'queued';
+    if (phase === 'failed') note = 'Antrean Apps Script tidak memulai penarikan ini dalam 20 menit.';
+  } else if (live.length || done.size < totalDays) {
+    phase = 'fetching';
+  } else {
+    // Every day is in: has the month's file been written since?
+    const channels = req.account_type === 'MAIN' ? ['boost', 'nonboost'] : ['cpas'];
+    const written = await repo.autoLibraryFiles({ brandId, channels, month: req.month });
+    const auto = written.filter((w) => w.original_filename.startsWith(AUTO_FILE_PREFIX));
+    const fresh = auto.filter((w) => new Date(w.written_at) >= new Date(lastFinish.getTime() - 5000));
+    const manual = written.filter((w) => !w.original_filename.startsWith(AUTO_FILE_PREFIX));
+    files = auto.map((w) => ({ channel: w.channel, rowCount: w.row_count }));
+    if (rows === 0) {
+      phase = 'done';
+      note = 'Meta tidak mengembalikan data untuk bulan ini; data lama (jika ada) tidak diubah.';
+    } else if (manual.length) {
+      phase = 'done';
+      note = 'Bulan ini sudah punya file unggahan manual di Performance Database, jadi file itu yang dipakai. Data hasil tarikan tetap tersimpan di ATLAS.';
+    } else if (fresh.length) {
+      phase = 'done';
+    } else if (now - lastFinish.getTime() > FILING_GRACE_MS) {
+      phase = 'done';
+      note = 'Data sudah tersimpan di ATLAS, tetapi file Performance Database belum diperbarui. Klik ikon simpan pada bulan ini untuk menyimpannya.';
+    } else {
+      phase = 'filing';
+    }
+  }
+
+  // Share of the work: queued 2%, pulling up to 92%, filing 96%, done 100%.
+  let pct;
+  if (phase === 'done') pct = 100;
+  else if (phase === 'filing') pct = 96;
+  else if (phase === 'queued') pct = 2;
+  else pct = Math.max(4, Math.round(4 + (daysDone / totalDays) * 88));
+  // Time left, from the pace so far once a few days are in.
+  let etaSeconds = null;
+  if (phase === 'fetching' && firstStart && daysDone >= 2) {
+    const perDay = (now - firstStart.getTime()) / daysDone;
+    etaSeconds = Math.round(((totalDays - daysDone) * perDay) / 1000) + 20;
+  }
+  const active = phase === 'queued' || phase === 'fetching' || phase === 'filing';
+  return {
+    id: Number(req.id),
+    accountType: req.account_type,
+    month: req.month,
+    rangeStart: req.range_start,
+    rangeEnd: req.range_end,
+    accounts,
+    requestedAt: req.requested_at,
+    requestedBy: req.requested_by_name ?? null,
+    phase,
+    active,
+    percent: pct,
+    daysDone,
+    totalDays,
+    rows,
+    runsDone: runs.filter((r) => r.status === 'success').length,
+    runsRunning: live.length,
+    etaSeconds,
+    startedAt: firstStart,
+    finishedAt: active || !runs.length ? null : lastFinish,
+    files,
+    note,
+  };
+}
+
+// The brand's pulls of the last day still worth showing: every one still
+// going, and the most recent one of each account type.
+export async function getFetchStatus(brandId) {
+  await assertBrand(brandId);
+  let requests;
+  try {
+    requests = await repo.listRecentFetchRequests(brandId);
+  } catch (err) {
+    if (err.code === '42P01') return { jobs: [], queue: null, tracked: false };
+    throw err;
+  }
+  const now = Date.now();
+  const all = await Promise.all(requests.map((r) => jobStatus(brandId, r, now)));
+  // Newest first: a type's latest pull, plus any older one still going.
+  const seen = new Set();
+  const jobs = all.filter((j) => {
+    const keep = j.active || !seen.has(j.accountType);
+    if (keep) seen.add(j.accountType);
+    return keep;
+  });
+  const queue = jobs.some((j) => j.phase === 'queued')
+    ? await repo.queueActivityElsewhere(brandId, STALE_RUN_MS / 60000)
+    : null;
+  return { jobs, queue, tracked: true };
 }
 
 // ---------------------------------------------------------------------

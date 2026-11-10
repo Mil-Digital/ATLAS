@@ -17,6 +17,7 @@ import api from '../api/client';
 import { useAuth } from '../contexts/AuthContext.jsx';
 import SearchField from '../components/common/SearchField.jsx';
 import MetaAdsAutoFetchPanel from '../components/brandSettings/MetaAdsAutoFetchPanel.jsx';
+import useMetaFetchJobs, { channelsOf } from '../components/brandSettings/useMetaFetchJobs.js';
 import { BrandLogo } from '../reportGenerator/components/BrandLogo';
 import { readSpreadsheetFile } from '../reportGenerator/lib/xlsxUtils';
 import { parseProductMasterRows } from '../reportGenerator/lib/shopeeDeepDive';
@@ -450,7 +451,7 @@ function DayStrip({ merged, month, wash }) {
   );
 }
 
-function DatasetRow({ platform, dataset, months, lookup, index, reduced, onPick, onDelete, onReimport, busyKey, targetMonth, onShowSpecs }) {
+function DatasetRow({ platform, dataset, months, lookup, index, reduced, onPick, onDelete, onReimport, busyKey, targetMonth, onShowSpecs, liveCells, flashCells }) {
   const [open, setOpen] = useState(false);
   const isReference = dataset.kind === 'reference';
   const status = datasetStatus(dataset, months, lookup, platform.id);
@@ -499,18 +500,22 @@ function DatasetRow({ platform, dataset, months, lookup, index, reduced, onPick,
             const merged = mergeParts(lookup.get(key), month);
             const state = cellState(merged, month);
             const pct = merged?.coveredDays ? Math.round((merged.coveredDays / month.days) * 100) : state === 'snapshot' ? 100 : 0;
+            // A Meta pull filling this cell right now, or the month it just filed.
+            const live = liveCells?.get(key);
+            const flash = flashCells?.has(key);
             return (
               <button
                 key={month.key} type="button"
-                className={`brand-cov is-${state} ${busyKey === key ? 'is-busy' : ''}`}
+                className={`brand-cov is-${state} ${busyKey === key ? 'is-busy' : ''}${live ? ' is-live' : ''}${flash ? ' is-flash' : ''}`}
                 style={{ '--cov-accent': platform.accent, '--cov-wash': platform.wash, '--cov-fill': `${pct}%` }}
                 onClick={() => (merged || dataset.autoOnly ? setOpen(true) : onPick(dataset, month))}
-                title={merged
+                title={live ? `${month.full} · sedang ditarik dari Meta (${live.percent}%)` : merged
                   ? `${month.full} · ${merged.coveredDays > 0 ? `${merged.coveredDays} dari ${month.days} hari` : 'snapshot bulanan'} · ${merged.parts.length} file (klik untuk melihat detail)`
                   : dataset.autoOnly ? `${month.full} · belum ada arsip (terisi otomatis setelah bulan selesai)` : `${month.full} · belum ada file (klik untuk upload)`}
               >
                 <i aria-hidden="true" />
                 <b>{busyKey === key ? '…' : state === 'empty' ? (dataset.autoOnly ? '·' : '+') : state === 'snapshot' ? '✓' : merged.coveredDays}</b>
+                {live && <em className="brand-cov-live" aria-hidden="true">{live.percent}%</em>}
               </button>
             );
           })}
@@ -692,7 +697,7 @@ function MonthRail({ windowMonths, windowEnd, setWindowEnd, focus, setFocus, loo
   );
 }
 
-function PlatformPanel({ platform, months, lookup, reduced, onPick, onDelete, onReimport, busyKey, focusMonth, onShowSpecs }) {
+function PlatformPanel({ platform, months, lookup, reduced, onPick, onDelete, onReimport, busyKey, focusMonth, onShowSpecs, liveCells, flashCells }) {
   const summary = useMemo(() => platformSummary(platform, months, lookup), [platform, months, lookup]);
   const datasets = useMemo(() => platform.datasets.filter((d) => !d.legacy
     || [...lookup.keys()].some((k) => k.startsWith(`${platform.id}:${d.channel}:`))), [platform, lookup]);
@@ -739,6 +744,7 @@ function PlatformPanel({ platform, months, lookup, reduced, onPick, onDelete, on
             key={dataset.channel} platform={platform} dataset={dataset} months={months} lookup={lookup}
             index={index} reduced={reduced} onPick={onPick} onDelete={onDelete} onReimport={onReimport} busyKey={busyKey}
             targetMonth={focusMonth ?? months[months.length - 1]} onShowSpecs={onShowSpecs}
+            liveCells={liveCells} flashCells={flashCells}
           />
         ))}
       </div>
@@ -784,6 +790,42 @@ function DataView({ brand, command, months, windowMonths, windowEnd, setWindowEn
       accountsRef.current?.focus({ preventScroll: true });
     });
   };
+  // Meta pulls in progress, shared by the grid cells and the API panel. When
+  // one ends, the files are read again (and once more a moment later, as
+  // Apps Script writes the month's file just after its last run), and the
+  // month that arrived lights up.
+  const gridRef = useRef(null);
+  const [flash, setFlash] = useState(null); // { keys: Set, until }
+  const flashMonth = (job) => setFlash({ keys: new Set(channelsOf(job.accountType).map((ch) => fileKey('meta', ch, job.month))), at: Date.now() });
+  const fetchJobs = useMetaFetchJobs(brand?.brand_id, {
+    onSettled: (job) => {
+      onLibraryChanged?.();
+      setTimeout(() => onLibraryChanged?.(), 6000);
+      if (job.phase === 'done') flashMonth(job);
+    },
+  });
+  useEffect(() => {
+    if (!flash) return undefined;
+    const id = setTimeout(() => setFlash(null), 4200);
+    return () => clearTimeout(id);
+  }, [flash]);
+  const liveCells = useMemo(() => {
+    const map = new Map();
+    for (const job of fetchJobs.jobs) {
+      if (!job.active) continue;
+      for (const ch of channelsOf(job.accountType)) map.set(fileKey('meta', ch, job.month), job);
+    }
+    return map;
+  }, [fetchJobs.jobs]);
+  // "Lihat di grid": the Meta grid on that month, scrolled into view.
+  const showMonth = (monthKeyToShow, accountType) => {
+    if (marketId !== 'meta') setMarketId('meta');
+    if (!windowMonths.some((m) => m.key === monthKeyToShow)) setWindowEnd(monthKeyToShow);
+    setFocus(monthKeyToShow);
+    flashMonth({ accountType, month: monthKeyToShow });
+    requestAnimationFrame(() => gridRef.current?.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' }));
+  };
+
   const platform = PLATFORMS.find((p) => p.id === marketId) ?? PLATFORMS[0];
   const focusMonth = focus ? months.find((m) => m.key === focus) : null;
   const target = focusMonth ?? months[months.length - 1];
@@ -834,7 +876,7 @@ function DataView({ brand, command, months, windowMonths, windowEnd, setWindowEn
       )}
       </div>
 
-      <div className="bp-toolbar">
+      <div className="bp-toolbar" ref={gridRef}>
         <MonthRail
           windowMonths={windowMonths} windowEnd={windowEnd} setWindowEnd={setWindowEnd}
           focus={focus} setFocus={setFocus} lookup={lookup} platformId={platform.id} reduced={reduced}
@@ -853,6 +895,7 @@ function DataView({ brand, command, months, windowMonths, windowEnd, setWindowEn
           key={platform.id} platform={platform} months={months} lookup={lookup} reduced={reduced}
           onPick={onPick} onDelete={onDelete} onReimport={onReimport} busyKey={busyKey} focusMonth={focusMonth}
           onShowSpecs={isAdmin && platform.id === 'meta' ? showSpecs : undefined}
+          liveCells={platform.id === 'meta' ? liveCells : undefined} flashCells={platform.id === 'meta' ? flash?.keys : undefined}
         />
       </AnimatePresence>
 
@@ -916,7 +959,7 @@ function DataView({ brand, command, months, windowMonths, windowEnd, setWindowEn
               the chosen month, open forms and loaded tables. */}
           {isAdmin && (
             <div role="tabpanel" hidden={metaPane !== 'api'}>
-              <MetaAdsAutoFetchPanel brand={brand} accountsVersion={accountsVersion} onLibraryChanged={onLibraryChanged} onOpenAutomation={openAccounts} specFocus={specFocus} />
+              <MetaAdsAutoFetchPanel brand={brand} accountsVersion={accountsVersion} onLibraryChanged={onLibraryChanged} onOpenAutomation={openAccounts} specFocus={specFocus} fetchJobs={fetchJobs} onShowMonth={showMonth} />
             </div>
           )}
           <div role="tabpanel" hidden={metaPane !== 'accounts'}>

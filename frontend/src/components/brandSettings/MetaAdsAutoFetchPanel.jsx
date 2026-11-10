@@ -4,6 +4,7 @@ import api from '../../api/client.js';
 import { useAuth } from '../../contexts/AuthContext.jsx';
 import SelectMenu from '../common/SelectMenu.jsx';
 import { SPEC_INTRO, SPEC_NOTES } from './MetaDatasetSpecs.jsx';
+import MetaFetchJobCard from './MetaFetchJobCard.jsx';
 import './metaAdsAutoFetch.css';
 
 // The breakdown every file carries, in this order (BREAKDOWNS in
@@ -24,8 +25,12 @@ const dateTime = (iso) => (iso ? new Date(iso).toLocaleString('id-ID', { day: '2
 // ATLAS unreachable at the end) stays 'running' forever in the log; past
 // this age it is shown as failed rather than as perpetually in progress.
 const STALE_RUN_MS = 15 * 60 * 1000;
-const POLL_MS = 10000;
-const POLL_MAX_MS = 6 * 60 * 1000;
+// Finished pulls stay on screen for a while, unless closed.
+const SHOW_FINISHED_MS = 30 * 60 * 1000;
+const DISMISSED_KEY = 'atlas.metaFetch.dismissed';
+const readDismissed = () => {
+  try { return new Set(JSON.parse(sessionStorage.getItem(DISMISSED_KEY) || '[]')); } catch { return new Set(); }
+};
 
 // The running month is fetched up to yesterday, so it is offered from the
 // 2nd onwards (on the 1st it has no complete day yet).
@@ -75,7 +80,9 @@ function runState(run) {
 // `specFocus` ({ type, sections, at }, from a Meta dataset row) switches to
 // that account type, scrolls to the breakdown & metrics, and briefly
 // highlights the sections that dataset's file holds.
-export default function MetaAdsAutoFetchPanel({ brand, accountsVersion = 0, onLibraryChanged, onOpenAutomation, specFocus }) {
+// `fetchJobs` (useMetaFetchJobs, shared with the grid) carries the pulls in
+// progress; `onShowMonth(month)` takes the user to that month in the grid.
+export default function MetaAdsAutoFetchPanel({ brand, accountsVersion = 0, onLibraryChanged, onOpenAutomation, specFocus, fetchJobs, onShowMonth }) {
   const { isAdmin, isViewOnly } = useAuth();
   const brandId = brand?.brand_id;
 
@@ -87,9 +94,7 @@ export default function MetaAdsAutoFetchPanel({ brand, accountsVersion = 0, onLi
   const [month, setMonth] = useState(() => monthOptions()[0].value);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
-  const pollUntil = useRef(0);
-  const pollTimer = useRef(null);
-  const libraryTimer = useRef(null);
+  const [dismissed, setDismissed] = useState(readDismissed);
   const specsRef = useRef(null);
   const rootRef = useRef(null);
   const [highlight, setHighlight] = useState([]);
@@ -144,44 +149,41 @@ export default function MetaAdsAutoFetchPanel({ brand, accountsVersion = 0, onLi
     return () => { cancelled = true; };
   }, [isAdmin, brandId, accountsVersion]);
 
-  useEffect(() => () => { clearTimeout(pollTimer.current); clearTimeout(libraryTimer.current); }, []);
-
-  // After "Tarik sekarang" the run finishes minutes later in Apps Script, so
-  // watch the log until nothing is running any more (or give up quietly).
-  const startPolling = useCallback(() => {
-    pollUntil.current = Date.now() + POLL_MAX_MS;
-    clearTimeout(pollTimer.current);
-    const tick = async () => {
-      const data = await loadOverview();
-      const active = data?.runs.some((r) => r.status === 'running' && Date.now() - new Date(r.startedAt).getTime() <= STALE_RUN_MS);
-      if (active !== false && Date.now() < pollUntil.current) {
-        pollTimer.current = setTimeout(tick, POLL_MS);
-        return;
-      }
-      // Apps Script files the month into the library a moment AFTER it
-      // reports the run finished, so look again shortly after the first refresh.
-      onLibraryChanged?.();
-      libraryTimer.current = setTimeout(() => onLibraryChanged?.(), 8000);
-    };
-    pollTimer.current = setTimeout(tick, POLL_MS);
-  }, [loadOverview, onLibraryChanged]);
+  // The stored months and run history follow the pulls: each step a pull
+  // moves on (a run done, the month filed) refreshes them.
+  const jobs = fetchJobs?.jobs ?? [];
+  const jobSignature = jobs.map((j) => `${j.id}:${j.phase}:${j.runsDone}`).join('|');
+  useEffect(() => {
+    if (jobSignature) loadOverview();
+  }, [jobSignature, loadOverview]);
 
   // The fixed metric set per campaign type (backend/src/config/metaAdsMetrics.js).
   const sections = (overview?.catalog ?? []).filter((s) => s.accountType === type);
   const registered = (t) => accounts?.find((a) => a.accountType === t)?.registered;
   const readOnly = isViewOnly;
 
-  const fetchNow = async () => {
+  const fetchNow = async (pick = { type, month }) => {
     setBusy('fetch'); setNotice(''); setError('');
     try {
-      await api.post('/meta-ads-insights/fetch', { brandId, accountType: type, month });
-      setNotice(`Penarikan ${monthName(month)} dijadwalkan di Apps Script. Biasanya selesai dalam beberapa menit; status di bawah diperbarui otomatis.`);
+      const { data } = await api.post('/meta-ads-insights/fetch', { brandId, accountType: pick.type, month: pick.month });
+      if (data?.reused) setNotice(`${monthName(pick.month)} sedang ditarik — progresnya ada di bawah.`);
+      // Before migration 064 there is no progress to follow: say so plainly.
+      else if (!data?.job) setNotice(`Penarikan ${monthName(pick.month)} dijadwalkan di Apps Script. Biasanya selesai dalam beberapa menit.`);
+      await fetchJobs?.refresh();
       await loadOverview();
-      startPolling();
     } catch (err) {
       setError(err.response?.data?.message || 'Gagal menjadwalkan penarikan');
     } finally { setBusy(''); }
   };
+  const dismiss = (id) => setDismissed((d) => {
+    const next = new Set(d).add(id);
+    try { sessionStorage.setItem(DISMISSED_KEY, JSON.stringify([...next])); } catch { /* per-viewer convenience only */ }
+    return next;
+  });
+  // Pulls on show: every one still going, and finished ones of the last half hour.
+  const shownJobs = jobs.filter((j) => j.active || (!dismissed.has(j.id)
+    && Date.now() - new Date(j.finishedAt ?? j.requestedAt).getTime() < SHOW_FINISHED_MS));
+  const pulling = jobs.find((j) => j.active && j.accountType === type && j.month === month);
 
   // Rebuilds the Performance Database library copy of a fetched month — for months
   // fetched before that step existed, or when it was skipped or failed.
@@ -269,10 +271,29 @@ export default function MetaAdsAutoFetchPanel({ brand, accountsVersion = 0, onLi
               <p>Bulan yang sudah ada diganti data terbaru; hasilnya masuk ke Performance Database.</p>
             </div>
             <div className="maf-month"><SelectMenu value={month} onChange={setMonth} options={monthOptions()} label="Bulan" /></div>
-            <button type="button" className="bp-primary" onClick={fetchNow} disabled={!canAct || busy === 'fetch'}>
-              {busy === 'fetch' ? <Loader2 size={15} className="maf-spin" /> : <RefreshCw size={15} />} Tarik {typeLabel}
+            <button
+              type="button" className={`bp-primary maf-pull${pulling ? ' is-pulling' : ''}`} onClick={() => fetchNow()} data-feature="meta-pull-now"
+              disabled={!canAct || busy === 'fetch' || Boolean(pulling)}
+              title={pulling ? `${monthName(month)} sedang ditarik (${pulling.percent}%)` : undefined}
+            >
+              {busy === 'fetch' || pulling ? <Loader2 size={15} className="maf-spin" /> : <RefreshCw size={15} />}
+              {busy === 'fetch' ? 'Menjadwalkan…' : pulling ? `Sedang ditarik · ${pulling.percent}%` : `Tarik ${typeLabel}`}
             </button>
           </div>
+
+          {shownJobs.length > 0 && (
+            <div className="mfj-list">
+              {shownJobs.map((job) => (
+                <MetaFetchJobCard
+                  key={job.id} job={job} queue={fetchJobs?.queue}
+                  onShow={onShowMonth ? () => onShowMonth(job.month, job.accountType) : undefined}
+                  onRetry={canAct ? () => fetchNow({ type: job.accountType, month: job.month }) : undefined}
+                  retrying={busy === 'fetch'}
+                  onDismiss={() => dismiss(job.id)}
+                />
+              ))}
+            </div>
+          )}
 
           <div className="maf-block">
             <h4 className="mx-h">Data tersimpan <small>{overview.months.length} bulan</small></h4>

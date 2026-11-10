@@ -26,6 +26,14 @@ export const SHOW_FOR_DAYS = 60;
 
 export const WHATS_NEW = [
   {
+    id: 'meta-pull-progress',
+    released: '2026-11-10',
+    path: '/data-brand',
+    target: '[data-feature="meta-pull-now"]',
+    title: 'Progres tarik data Meta Ads yang jelas',
+    body: 'Setelah menekan Tarik Meta Ads, kartu progres menunjukkan tahapnya (antre, tarik dari Meta, simpan, selesai), persentase, hari dan baris yang masuk, serta perkiraan selesai. Semua anggota tim melihat progres yang sama, dan bulan yang selesai langsung terisi di grid.',
+  },
+  {
     id: 'annual-plan-compare',
     released: '2026-11-05',
     path: '/brand-tracking',

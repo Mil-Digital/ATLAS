@@ -24,6 +24,9 @@ const reportGenerator = requireModule('report_generator');
 router.get('/days', reportGenerator, requireBrandAccess((req) => req.query.brandId), brandQueryValidation, ctrl.getStoredDays);
 router.get('/export', reportGenerator, requireBrandAccess((req) => req.query.brandId), exportRangeValidation, ctrl.exportRange);
 
+// Progress of a pull, for anyone working on the brand's data (read-only).
+router.get('/fetch-status', requireModule('meta_automation', 'brand_settings'), requireBrandAccess((req) => req.query.brandId), brandQueryValidation, ctrl.getFetchStatus);
+
 router.use(requireModule('meta_automation'));
 
 router.get('/overview', requireBrandAccess((req) => req.query.brandId), brandQueryValidation, ctrl.getOverview);

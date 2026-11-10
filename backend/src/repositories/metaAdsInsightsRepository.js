@@ -186,3 +186,86 @@ export async function listRecentRuns(brandId, limit = 30, db = pool) {
   );
   return rows;
 }
+
+// ---------------------------------------------------------------------
+// meta_ads_fetch_requests (migration 064): one row per "Tarik sekarang"
+// ---------------------------------------------------------------------
+export async function insertFetchRequest({ brandId, accountType, month, rangeStart, rangeEnd, accountIds, queuedItems, userId }, db = pool) {
+  const { rows } = await db.query(
+    `INSERT INTO meta_ads_fetch_requests (brand_id, account_type, month, range_start, range_end, account_ids, queued_items, requested_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id`,
+    [brandId, accountType, `${month}-01`, rangeStart, rangeEnd, accountIds, queuedItems ?? null, userId ?? null],
+  );
+  return rows[0].id;
+}
+
+// The brand's presses of the last day, newest first.
+export async function listRecentFetchRequests(brandId, db = pool) {
+  const { rows } = await db.query(
+    `SELECT r.id, r.account_type, to_char(r.month, 'YYYY-MM') AS month,
+            r.range_start::text AS range_start, r.range_end::text AS range_end,
+            r.account_ids, r.queued_items, r.requested_at, u.full_name AS requested_by_name
+     FROM meta_ads_fetch_requests r
+     LEFT JOIN users u ON u.user_id = r.requested_by
+     WHERE r.brand_id = $1 AND r.requested_at > now() - interval '1 day'
+     ORDER BY r.requested_at DESC
+     LIMIT 8`,
+    [brandId],
+  );
+  return rows;
+}
+
+// Manual runs of one brand/type/month that started from `since` on.
+export async function listRunsSince({ brandId, accountType, month, since }, db = pool) {
+  const { rows } = await db.query(
+    `SELECT fetch_run_id, ad_account_id, range_start::text AS range_start, range_end::text AS range_end,
+            status, row_count, note, started_at, finished_at
+     FROM meta_ads_fetch_log
+     WHERE brand_id = $1 AND account_type = $2 AND month = $3::date
+       AND trigger = 'manual' AND started_at >= $4
+     ORDER BY started_at`,
+    [brandId, accountType, `${month}-01`, since],
+  );
+  return rows;
+}
+
+// How far running runs have got: the days and rows they have written so far.
+export async function ingestedSoFar({ brandId, accountType, runIds, startDate, endDate }, db = pool) {
+  if (!runIds.length) return new Map();
+  const { rows } = await db.query(
+    `SELECT fetch_run_id, COUNT(DISTINCT entry_date)::int AS days, COUNT(*)::int AS rows
+     FROM meta_ads_insights_daily
+     WHERE brand_id = $1 AND account_type = $2 AND entry_date BETWEEN $3 AND $4
+       AND fetch_run_id = ANY($5::text[])
+     GROUP BY fetch_run_id`,
+    [brandId, accountType, startDate, endDate, runIds],
+  );
+  return new Map(rows.map((r) => [r.fetch_run_id, { days: r.days, rows: r.rows }]));
+}
+
+// The auto-filed library copies of a month, with when each was last written.
+export async function autoLibraryFiles({ brandId, channels, month }, db = pool) {
+  const { rows } = await db.query(
+    `SELECT channel, original_filename, row_count, COALESCE(updated_at, uploaded_at) AS written_at
+     FROM ads_reports.brand_library_files
+     WHERE brand_id = $1 AND platform = 'meta'::ads_reports.platform_enum AND channel = ANY($2)
+       AND period_month = $3::date`,
+    [brandId, channels, `${month}-01`],
+  );
+  return rows;
+}
+
+// What else the shared Apps Script queue is busy with: runs going on now and
+// presses still waiting, for other brands.
+export async function queueActivityElsewhere(brandId, staleMinutes, db = pool) {
+  const { rows } = await db.query(
+    `SELECT
+       (SELECT COUNT(*)::int FROM meta_ads_fetch_log
+         WHERE brand_id <> $1 AND status = 'running' AND started_at > now() - make_interval(mins => $2)) AS running,
+       (SELECT COUNT(DISTINCT brand_id)::int FROM meta_ads_fetch_log
+         WHERE brand_id <> $1 AND status = 'running' AND started_at > now() - make_interval(mins => $2)) AS brands`,
+    [brandId, staleMinutes],
+  );
+  return rows[0];
+}

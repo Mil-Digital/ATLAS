@@ -33,8 +33,16 @@ export const fetchNow = asyncHandler(async (req, res) => {
     brandId: Number(req.body.brandId),
     accountType: req.body.accountType,
     month: req.body.month,
+    userId: req.user?.userId ?? null,
   });
   res.status(202).json(result);
+});
+
+// GET /api/meta-ads-insights/fetch-status?brandId=
+// The brand's "Tarik sekarang" pulls: step, percent, days and rows so far.
+export const getFetchStatus = asyncHandler(async (req, res) => {
+  validate(req);
+  res.json(await service.getFetchStatus(Number(req.query.brandId)));
 });
 
 // POST /api/meta-ads-insights/library  { brandId, accountType, month }
