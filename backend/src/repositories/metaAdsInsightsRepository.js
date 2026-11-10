@@ -234,14 +234,14 @@ export async function listRunsSince({ brandId, accountType, month, since }, db =
 export async function ingestedSoFar({ brandId, accountType, runIds, startDate, endDate }, db = pool) {
   if (!runIds.length) return new Map();
   const { rows } = await db.query(
-    `SELECT fetch_run_id, COUNT(DISTINCT entry_date)::int AS days, COUNT(*)::int AS rows
+    `SELECT fetch_run_id, array_agg(DISTINCT entry_date::text) AS dates, COUNT(*)::int AS rows
      FROM meta_ads_insights_daily
      WHERE brand_id = $1 AND account_type = $2 AND entry_date BETWEEN $3 AND $4
        AND fetch_run_id = ANY($5::text[])
      GROUP BY fetch_run_id`,
     [brandId, accountType, startDate, endDate, runIds],
   );
-  return new Map(rows.map((r) => [r.fetch_run_id, { days: r.days, rows: r.rows }]));
+  return new Map(rows.map((r) => [r.fetch_run_id, { dates: r.dates ?? [], rows: r.rows }]));
 }
 
 // The auto-filed library copies of a month, with when each was last written.

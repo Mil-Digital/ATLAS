@@ -151,6 +151,7 @@ export async function requestFetch({ brandId, accountType, month, userId }) {
 // press as failed after a while, so nothing spins forever.
 // ---------------------------------------------------------------------
 const STALE_RUN_MS = 15 * 60 * 1000;
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
 const QUEUE_GIVE_UP_MS = 20 * 60 * 1000;
 const FILING_GRACE_MS = 3 * 60 * 1000;
 
@@ -189,22 +190,35 @@ async function jobStatus(brandId, req, now) {
 
   // Days done, per account: a finished run counts its whole range; a running
   // one the days it has written so far.
+  const inRange = (d) => d >= req.range_start && d <= req.range_end;
   const done = new Set();
-  let partial = 0;
+  const written = new Set(); // account|day, finished or being written
+  const pulling = new Set(); // days inside a run still going
   let rows = 0;
   for (const r of runs) {
     if (r.status === 'success') {
       for (const d of eachDay(r.range_start, r.range_end)) {
-        if (d >= req.range_start && d <= req.range_end) done.add(`${r.ad_account_id}|${d}`);
+        if (inRange(d)) { done.add(`${r.ad_account_id}|${d}`); written.add(`${r.ad_account_id}|${d}`); }
       }
       rows += r.row_count ?? 0;
     } else if (r.status === 'running' && !isStale(r)) {
       const p = progress.get(r.fetch_run_id);
-      partial += Math.min(p?.days ?? 0, daysBetween(r.range_start, r.range_end));
+      for (const d of p?.dates ?? []) if (inRange(d)) written.add(`${r.ad_account_id}|${d}`);
+      for (const d of eachDay(r.range_start, r.range_end)) if (inRange(d)) pulling.add(d);
       rows += p?.rows ?? 0;
     }
   }
-  const daysDone = Math.min(done.size + partial, totalDays);
+  const daysDone = Math.min(written.size, totalDays);
+  // Each day of the range: in (every account), coming in now, or waiting.
+  const perDay = new Map();
+  for (const key of written) {
+    const d = key.slice(key.indexOf('|') + 1);
+    perDay.set(d, (perDay.get(d) ?? 0) + 1);
+  }
+  const days = eachDay(req.range_start, req.range_end).map((d) => ({
+    date: d,
+    state: (perDay.get(d) ?? 0) >= accounts ? 'done' : pulling.has(d) || perDay.get(d) ? 'pulling' : 'waiting',
+  }));
   const failed = runs.filter((r) => r.status === 'failed' || isStale(r));
   const lastFinish = runs.reduce((t, r) => (r.finished_at && new Date(r.finished_at) > t ? new Date(r.finished_at) : t), new Date(0));
   const firstStart = runs.length ? new Date(runs[0].started_at) : null;
@@ -212,6 +226,7 @@ async function jobStatus(brandId, req, now) {
   let phase;
   let note = null;
   let files = [];
+  let filedAt = null;
   if (failed.length) {
     phase = 'failed';
     const f = failed[failed.length - 1];
@@ -229,6 +244,7 @@ async function jobStatus(brandId, req, now) {
     const fresh = auto.filter((w) => new Date(w.written_at) >= new Date(lastFinish.getTime() - 5000));
     const manual = written.filter((w) => !w.original_filename.startsWith(AUTO_FILE_PREFIX));
     files = auto.map((w) => ({ channel: w.channel, rowCount: w.row_count }));
+    filedAt = fresh.length ? fresh.reduce((t, w) => (new Date(w.written_at) > t ? new Date(w.written_at) : t), new Date(0)) : null;
     if (rows === 0) {
       phase = 'done';
       note = 'Meta tidak mengembalikan data untuk bulan ini; data lama (jika ada) tidak diubah.';
@@ -258,6 +274,29 @@ async function jobStatus(brandId, req, now) {
     etaSeconds = Math.round(((totalDays - daysDone) * perDay) / 1000) + 20;
   }
   const active = phase === 'queued' || phase === 'fetching' || phase === 'filing';
+
+  // What happened, in order, as the card's log reads it.
+  const short = (a, b) => {
+    const m = MONTH_ABBR[Number(a.slice(5, 7)) - 1];
+    return a === b ? `${Number(a.slice(8))} ${m}` : `${Number(a.slice(8))}–${Number(b.slice(8))} ${m}`;
+  };
+  const many = accounts > 1;
+  const events = [{ at: req.requested_at, kind: 'request', text: `Ditekan${req.requested_by_name ? ` oleh ${req.requested_by_name}` : ''}` }];
+  for (const r of runs) {
+    const span = `${short(r.range_start, r.range_end)}${many ? ` · ${r.ad_account_id}` : ''}`;
+    events.push({ at: r.started_at, kind: 'start', text: `Mulai menarik ${span}` });
+    if (r.status === 'success') {
+      events.push({ at: r.finished_at, kind: 'run', text: `${span} masuk`, rows: r.row_count ?? 0 });
+    } else if (r.status === 'failed') {
+      events.push({ at: r.finished_at ?? r.started_at, kind: 'fail', text: `${span} gagal${r.note ? `: ${r.note}` : ''}` });
+    } else if (isStale(r)) {
+      events.push({ at: new Date(new Date(r.started_at).getTime() + STALE_RUN_MS), kind: 'fail', text: `${span} berhenti tanpa laporan dari Apps Script` });
+    }
+  }
+  if (filedAt) events.push({ at: filedAt, kind: 'filed', text: 'File bulanan masuk Performance Database' });
+  if (phase === 'failed' && !runs.length) events.push({ at: new Date(requestedAt.getTime() + QUEUE_GIVE_UP_MS), kind: 'fail', text: 'Antrean tidak memulai penarikan dalam 20 menit' });
+  events.sort((x, y) => new Date(x.at) - new Date(y.at));
+
   return {
     id: Number(req.id),
     accountType: req.account_type,
@@ -280,6 +319,8 @@ async function jobStatus(brandId, req, now) {
     finishedAt: active || !runs.length ? null : lastFinish,
     files,
     note,
+    days,
+    events,
   };
 }
 
