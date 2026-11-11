@@ -26,6 +26,14 @@ export const SHOW_FOR_DAYS = 60;
 
 export const WHATS_NEW = [
   {
+    id: 'annual-plan-side-by-side',
+    released: '2026-11-11',
+    path: '/brand-tracking',
+    target: '[data-feature="plan-adjustment"]',
+    title: 'Target dan realisasi berdampingan',
+    body: 'Rencana per bulan kini satu tabel: target, realisasi, kontribusi rencana dan riil, budget dan spend, serta % alokasi dan CPR riil berdampingan per bulan, dengan subtotal kuartal. Tiga kartu di atas merangkum kondisi tiap bagian; target awal ada di bawah sebagai pembanding.',
+  },
+  {
     id: 'annual-plan-split-check',
     released: '2026-11-11',
     path: '/brand-tracking',
