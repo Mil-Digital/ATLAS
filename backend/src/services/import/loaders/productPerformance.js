@@ -1,4 +1,4 @@
-import { insertChunked, dedupeBy } from '../bulk.js';
+import { insertChunked, dedupeBy, dedupeByKeys, upsertSql } from '../bulk.js';
 import {
   blankToNone,
   parseFilenamePeriod,
@@ -39,6 +39,70 @@ export function detectProductPerformancePeriod(filepath, filename = '') {
   }
 
   return { start: null, end: null };
+}
+
+// Product Performance carries no dates at all — not in a column, not in the
+// workbook properties — so a file renamed away from Shopee's
+// "parentskudetail.YYYYMMDD_YYYYMMDD" has nothing to say which days it
+// covers. Its sales figures do, though: the products' "Penjualan (Pesanan
+// Siap Dikirim)" add up exactly to Performance Overview's "Pesanan Siap
+// Dikirim" daily sales over the same range (checked on several months and
+// two brands, to the rupiah). So the range is the run of consecutive days in
+// the slot month whose daily sales sum to the file's total.
+//
+// Needs that month's Performance Overview imported first; returns null when
+// it is not, or when no run matches, and the caller files the month as a
+// snapshot like before.
+const SALES_MATCH_TOLERANCE = 0.001; // 0.1% — Shopee's two exports agree to the rupiah
+
+export function productSalesTotal(filepath) {
+  const wb = readWorkbook(filepath);
+  if (!wb.SheetNames.includes('Produk dengan Performa Terbaik')) return 0;
+  return readSheetAsStrings(wb, 'Produk dengan Performa Terbaik')
+    .filter((row) => blankToNone(row['Kode Variasi']) == null && parseIntValue(row['Kode Produk']))
+    .reduce((sum, row) => sum + (parseIdr(row['Penjualan (Pesanan Siap Dikirim) (IDR)']) ?? 0), 0);
+}
+
+// days: [{ date: 'YYYY-MM-DD', sales: number }] sorted by date. Returns the
+// consecutive run whose sum is closest to `total` within tolerance; on a tie
+// the longer run wins (zero-sales days at either edge are indistinguishable,
+// and a month export normally spans them).
+export function matchSalesRange(days, total) {
+  if (!(total > 0) || days.length === 0) return null;
+  const tolerance = Math.max(1, total * SALES_MATCH_TOLERANCE);
+  const dayIndex = (d) => Math.round(Date.parse(`${d}T00:00:00Z`) / 86400000);
+  let best = null;
+  for (let i = 0; i < days.length; i += 1) {
+    let sum = 0;
+    for (let j = i; j < days.length; j += 1) {
+      if (j > i && dayIndex(days[j].date) - dayIndex(days[j - 1].date) !== 1) break; // a gap ends the run
+      sum += days[j].sales;
+      if (sum > total + tolerance) break;
+      const diff = Math.abs(sum - total);
+      if (diff > tolerance) continue;
+      const len = j - i + 1;
+      if (!best || diff < best.diff - 0.5 || (Math.abs(diff - best.diff) <= 0.5 && len > best.len)) {
+        best = { start: days[i].date, end: days[j].date, diff, len };
+      }
+    }
+  }
+  return best ? { start: best.start, end: best.end } : null;
+}
+
+export async function inferPeriodFromSales(client, filepath, brandId, monthRange) {
+  if (!monthRange?.start || !monthRange?.end) return null;
+  const total = productSalesTotal(filepath);
+  if (!(total > 0)) return null;
+  const res = await client.query(
+    `SELECT to_char(dop.report_date, 'YYYY-MM-DD') AS date, dop.total_sales_idr::float8 AS sales
+     FROM shopee.daily_order_performance dop
+     JOIN shopee.order_pipeline_stages ops ON ops.stage_id = dop.stage_id
+     WHERE dop.brand_id = $1 AND ops.stage_name = 'Pesanan Siap Dikirim'
+       AND dop.report_date BETWEEN $2 AND $3
+     ORDER BY dop.report_date`,
+    [brandId, monthRange.start, monthRange.end],
+  );
+  return matchSalesRange(res.rows.map((r) => ({ date: r.date, sales: Number(r.sales) || 0 })), total);
 }
 
 async function upsertProduct(client, resolver, brandId, productId, productName, statusName) {
@@ -161,9 +225,11 @@ export async function loadProductPerformance(client, resolver, filepath, brandId
     500,
   );
 
+  const keys = ['brand_id', 'period_id', 'product_id'];
   return insertChunked(
-    client, 'product_performance_summary', SUMMARY_COLUMNS, summaryRows,
-    'ON CONFLICT (brand_id, period_id, product_id) DO NOTHING RETURNING id', 150,
+    client, 'product_performance_summary', SUMMARY_COLUMNS,
+    dedupeByKeys(summaryRows, keys.map((k) => SUMMARY_COLUMNS.indexOf(k))),
+    upsertSql(SUMMARY_COLUMNS, keys), 150,
   );
 }
 
@@ -249,9 +315,11 @@ export async function loadProductVariantPerformance(client, resolver, filepath, 
     500,
   );
 
+  const keys = ['brand_id', 'period_id', 'variant_id'];
   return insertChunked(
-    client, 'product_variant_performance', VARIANT_COLUMNS, perfRows,
-    'ON CONFLICT (brand_id, period_id, variant_id) DO NOTHING RETURNING id', 400,
+    client, 'product_variant_performance', VARIANT_COLUMNS,
+    dedupeByKeys(perfRows, keys.map((k) => VARIANT_COLUMNS.indexOf(k))),
+    upsertSql(VARIANT_COLUMNS, keys), 400,
   );
 }
 

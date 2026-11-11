@@ -13,6 +13,7 @@ import {
   applyAdsRecommendation,
   applyPriceCompetitiveness,
   detectProductPerformancePeriod,
+  inferPeriodFromSales,
   loadProductPerformance,
   loadProductVariantPerformance,
   resolvePeriodId,
@@ -80,12 +81,15 @@ function monthBounds(month) {
 }
 
 // `month` is the library slot ("YYYY-MM") the file was filed under, when
-// there is one. Product Performance is a monthly aggregate with no dates in
-// it, and a renamed file carries no range in its name either; without the
-// slot it fell back to the brand's latest Performance Overview month, which
-// pinned every backfilled month onto the same period. The slot month is used
-// only to file the rows — the returned `period` stays what the file itself
-// says, so the library keeps showing such a file as a monthly snapshot.
+// there is one. Product Performance has no dates in it, and a renamed file
+// carries no range in its name either. For such a file the range is matched
+// from its sales against that month's Performance Overview daily sales
+// (inferPeriodFromSales); the returned `period` then carries those days, so
+// the library shows real coverage. When nothing matches, the slot month is
+// used only to file the rows and `period` stays empty, so the library keeps
+// showing the file as a monthly snapshot. (Without the slot it used to fall
+// back to the brand's latest Performance Overview month, pinning every
+// backfilled month onto the same period.)
 export async function processUpload({ uploadId, fileType, filepath, brandId, filename, month = null }) {
   const handler = FILE_TYPE_HANDLERS[fileType];
   if (!handler) throw new Error(`Tipe file tidak dikenal: ${fileType}`);
@@ -101,13 +105,20 @@ export async function processUpload({ uploadId, fileType, filepath, brandId, fil
       [uploadId],
     );
 
-    const period = handler.detectPeriod(filepath, filename);
-    // A Shopee filename's own range still wins; the slot beats the weaker
-    // "newly added products" guess inside detectPeriod.
-    const slotPeriod = fileType === 'product_performance' && !parseFilenamePeriod(filename ?? '')
-      ? monthBounds(month)
-      : null;
-    const importPeriod = slotPeriod ?? period;
+    let period = handler.detectPeriod(filepath, filename);
+    // A Shopee filename's own range still wins; then the sales match; the
+    // slot beats the weaker "newly added products" guess inside detectPeriod.
+    let importPeriod = period;
+    if (fileType === 'product_performance' && !parseFilenamePeriod(filename ?? '')) {
+      const slot = monthBounds(month);
+      const matched = await inferPeriodFromSales(client, filepath, brandId, slot);
+      if (matched) {
+        period = { ...matched, source: 'overview' };
+        importPeriod = matched;
+      } else if (slot) {
+        importPeriod = slot;
+      }
+    }
     await client.query(
       `UPDATE uploads SET period_start = $1, period_end = $2 WHERE upload_id = $3`,
       [importPeriod.start, importPeriod.end, uploadId],

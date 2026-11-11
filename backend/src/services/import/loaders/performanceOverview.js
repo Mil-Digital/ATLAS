@@ -1,4 +1,4 @@
-import { insertChunked } from '../bulk.js';
+import { dedupeByKeys, insertChunked, upsertSql } from '../bulk.js';
 import {
   parseIdr,
   parseIntValue,
@@ -80,9 +80,11 @@ export async function loadDailyOrderPerformance(client, resolver, filepath, bran
     throw new Error('Tidak ada baris harian yang terbaca dari sheet Pesanan Dibuat / Siap Dikirim / Dibayar. Pastikan file adalah ekspor Performa Toko › Tinjauan dari Shopee Seller Centre.');
   }
 
+  const keys = ['brand_id', 'report_date', 'stage_id'];
   return insertChunked(
-    client, 'daily_order_performance', DAILY_ORDER_COLUMNS, batch,
-    'ON CONFLICT (brand_id, report_date, stage_id) DO NOTHING RETURNING id', 300,
+    client, 'daily_order_performance', DAILY_ORDER_COLUMNS,
+    dedupeByKeys(batch, keys.map((k) => DAILY_ORDER_COLUMNS.indexOf(k))),
+    upsertSql(DAILY_ORDER_COLUMNS, keys), 300,
   );
 }
 
@@ -203,9 +205,11 @@ export async function loadDailyChannelPerformance(client, resolver, filepath, br
     batch.push([r.reportDate, stageId, channelId, subSourceId, ...r.values, brandId, uploadId]);
   }
 
+  const keys = ['brand_id', 'report_date', 'stage_id', 'channel_id', 'sub_source_id'];
   return insertChunked(
-    client, 'daily_channel_performance', DAILY_CHANNEL_COLUMNS, batch,
-    'ON CONFLICT (brand_id, report_date, stage_id, channel_id, sub_source_id) DO NOTHING RETURNING id', 300,
+    client, 'daily_channel_performance', DAILY_CHANNEL_COLUMNS,
+    dedupeByKeys(batch, keys.map((k) => DAILY_CHANNEL_COLUMNS.indexOf(k))),
+    upsertSql(DAILY_CHANNEL_COLUMNS, keys), 300,
   );
 }
 
