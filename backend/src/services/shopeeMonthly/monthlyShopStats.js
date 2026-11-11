@@ -1,5 +1,6 @@
 import pool from '../../config/db.js';
-import { parseIdr, parsePct, readSheetRaw, readWorkbook } from '../import/parsers.js';
+import { parseIdr, parsePct, readSheetRaw } from '../import/parsers.js';
+import { readShopeeWorkbook as readWorkbook } from '../import/shopeeLocale.js';
 import * as fileStore from '../fileStore.js';
 
 // Shopee's own monthly figures, read from the shop-stats export the brand

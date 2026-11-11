@@ -7,9 +7,9 @@ import {
   parseTs,
   readSheetAsStrings,
   readSheetRaw,
-  readWorkbook,
   toDateString,
 } from '../parsers.js';
+import { readShopeeWorkbook as readWorkbook } from '../shopeeLocale.js';
 
 const STAGE_SHEETS = ['Pesanan Dibuat', 'Pesanan Siap Dikirim', 'Pesanan Dibayar'];
 
@@ -71,6 +71,13 @@ export async function loadDailyOrderPerformance(client, resolver, filepath, bran
         brandId, uploadId,
       ]);
     }
+  }
+
+  // Nothing parsed means the columns were not recognised, not an empty
+  // month. Failing here keeps the library from marking the file "terbaca
+  // Dashboard" while GMV reads Rp0, and offers "Impor ulang" instead.
+  if (batch.length === 0) {
+    throw new Error('Tidak ada baris harian yang terbaca dari sheet Pesanan Dibuat / Siap Dikirim / Dibayar. Pastikan file adalah ekspor Performa Toko › Tinjauan dari Shopee Seller Centre.');
   }
 
   return insertChunked(

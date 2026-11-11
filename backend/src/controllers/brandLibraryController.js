@@ -325,7 +325,7 @@ async function storeOnePart({ req, brandId, platform, channel, month, isReferenc
         rawFile: null,
       });
       const result = await processUpload({
-        uploadId, fileType, filepath: file.buffer, brandId, filename: file.originalname,
+        uploadId, fileType, filepath: file.buffer, brandId, filename: file.originalname, month,
       });
       await library.setDashboardUpload(saved.id, uploadId);
       await library.setImportResult(saved.id, { status: 'success', rows: result.rowsInserted, uploadId });
@@ -396,7 +396,10 @@ export const reimportLibraryFile = asyncHandler(async (req, res) => {
       filename: file.original_filename,
       rawFile: null, // already in the library row
     });
-    const result = await processUpload({ uploadId, fileType, filepath: file.raw_file, brandId });
+    const result = await processUpload({
+      uploadId, fileType, filepath: file.raw_file, brandId,
+      filename: file.original_filename, month: file.period_month?.slice(0, 7) ?? null,
+    });
     await library.setDashboardUpload(fileId, uploadId);
     await library.setImportResult(fileId, { status: 'success', rows: result.rowsInserted, uploadId });
     const synced = await library.syncCoverageFromImport(fileId, result.period, file.period_month?.slice(0, 7));

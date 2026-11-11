@@ -7,9 +7,9 @@ import {
   parsePct,
   parseTs,
   readSheetAsStrings,
-  readWorkbook,
   toDateString,
 } from '../parsers.js';
+import { readShopeeWorkbook as readWorkbook } from '../shopeeLocale.js';
 import { deriveReportPeriod } from './performanceOverview.js';
 
 export function detectProductPerformancePeriod(filepath, filename = '') {
@@ -140,6 +140,13 @@ export async function loadProductPerformance(client, resolver, filepath, brandId
         parseIdr(row['Rata-rata Hari Pembelian Terulang (Pesanan Siap Dikirim)']),
         brandId, uploadId,
     ]);
+  }
+
+  // Tidak ada produk yang terbaca berarti kolomnya tidak dikenali, bukan
+  // bulan yang kosong — gagalkan impornya supaya tidak tercatat "terbaca
+  // Dashboard" dengan 0 baris.
+  if (summaryRows.length === 0) {
+    throw new Error('Tidak ada produk yang terbaca dari sheet "Produk dengan Performa Terbaik". Pastikan file adalah ekspor Performa Toko › Produk › Performa Produk dari Shopee Seller Centre.');
   }
 
   // brand_id: COALESCE mempertahankan pemilik pertama, sama seperti

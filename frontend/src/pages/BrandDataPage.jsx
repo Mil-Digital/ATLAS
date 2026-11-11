@@ -258,7 +258,10 @@ const DASHBOARD_CHANNELS = new Set(['order', 'performance_overview', 'product_pe
 // catatannya menyuruh mengklik tombol yang tidak pernah dirender.
 function needsImport(channel, file) {
   if (!DASHBOARD_CHANNELS.has(channel)) return false;
-  if (file.import_status === 'success') return false;
+  // "Success" with zero rows is how an export the importer could not read
+  // (e.g. Shopee's English export, before it was supported) was recorded —
+  // it never reached the Dashboard, so it gets the "Impor ulang" button too.
+  if (file.import_status === 'success') return file.import_rows === 0;
   return file.import_status === 'failed' || file.dashboard_upload_id == null;
 }
 
