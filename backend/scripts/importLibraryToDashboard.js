@@ -77,6 +77,7 @@ async function main() {
         filepath: row.raw_file,
         brandId: row.brand_id,
         filename: row.original_filename,
+        month: row.period_month?.slice(0, 7) ?? null,
       });
       await library.setDashboardUpload(row.id, uploadId);
       const synced = await library.syncCoverageFromImport(row.id, result.period, row.period_month?.slice(0, 7));
