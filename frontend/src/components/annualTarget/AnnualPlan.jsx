@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Activity, ArrowUpRight, Check, ChevronDown, Crosshair, Flag, History, Link2, Loader2, PencilLine, Scale, X,
+  Activity, AlertTriangle, ArrowUpRight, Check, ChevronDown, Crosshair, Flag, History, Link2, Loader2, PencilLine, Scale, Wand2, X,
 } from 'lucide-react';
 import api from '../../api/client.js';
 import { fmtRp, fmtRpShort } from '../../dailyTracking/lib/summary.js';
@@ -11,9 +11,9 @@ import {
 } from './annualModel.js';
 import './annualTarget.css';
 
-// Brand Tracking › Target & Budget › Rencana tahunan — the year as a sheet,
-// the way the team keeps it in a spreadsheet: the 12 months run across the
-// top, the figures down the side, three blocks one above the other.
+// Brand Tracking › Target & Budget › Rencana tahunan — the year at a glance,
+// then three tables, one shown at a time behind tabs, each with the 12
+// months running down the side (grouped by quarter) and its figures across.
 //
 //   Target adjustment  the plan as it stands after every update — revenue,
 //                      its share and growth, quarters and halves, the ad
@@ -26,7 +26,9 @@ import './annualTarget.css';
 //   Target awal        the plan before the year ran (the baseline version's
 //                      months, kept by the server since migration 063).
 //
-// The 12 months must add up exactly to the year set in Brand Setting.
+// The 12 months must add up exactly to the year set in Brand Setting; while
+// the split is edited a check bar says how far off each total is, what to
+// change, and offers to scale the months onto 100%.
 
 const MODES_KEY = 'atlas.annualPlan.modes';
 const UNIT_KEY = 'atlas.annualPlan.unit';
@@ -85,7 +87,8 @@ function resolve(mode, side, total, sales, yearRatio) {
   const slack = mode === 'rp' ? 0 : mode === 'pct' ? total * 0.0006 + 12 : sum(sales) * 0.00005 + 12;
   const amounts = valid && Math.abs(sum(raw) - total) <= slack ? settle(raw, total) : raw.map((v) => Math.round(v));
   const got = sum(amounts);
-  return { valid, amounts, got, ok: valid && got === total };
+  const bad = vals.flatMap((v, i) => (v == null ? [i] : []));
+  return { valid, amounts, got, ok: valid && got === total, bad };
 }
 
 function readPref(key, fallback, allowed) {
@@ -175,9 +178,22 @@ function useSplitEditor(data, onChange) {
     if (modes.spend === 'cpr') setDraft({ ...d, spend: { texts: target.map(() => textOf('cpr', yearRatio)), exact: target.map(() => yearRatio) } });
     else setDraft({ ...d, spend: makeSide(modes.spend, followSales(totalSpend, target), totalSpend, target) });
   };
+  // Every month scaled by the same factor so the 12 add up to the year:
+  // the shape the person typed stays, only the total moves to 100%.
+  const fit = (key) => {
+    const d = open();
+    if (key === 'sales') {
+      if (!sales.valid) return;
+      const next = sales.got > 0 ? settle(sales.amounts.map((v) => (v * totalSales) / sales.got), totalSales) : splitEqual(totalSales);
+      setDraft({ ...d, sales: makeSide(modes.sales, next, totalSales, next) });
+    } else if (spend?.valid) {
+      const next = spend.got > 0 ? settle(spend.amounts.map((v) => (v * totalSpend) / spend.got), totalSpend) : followSales(totalSpend, sales.amounts);
+      setDraft({ ...d, spend: makeSide(modes.spend, next, totalSpend, sales.amounts) });
+    }
+  };
   return {
     hasSpend, totalSales, totalSpend, yearRatio, modes, setMode, draft, reset: () => setDraft(null), cur, sales, spend,
-    followsTarget, type, spreadSales, followTarget, ok: sales.ok && (!spend || spend.ok),
+    followsTarget, type, spreadSales, followTarget, fit, ok: sales.ok && (!spend || spend.ok),
   };
 }
 
@@ -257,6 +273,7 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
   const [unit, setUnitState] = useState(() => readPref(UNIT_KEY, 'jt', (v) => v === 'full' || v === 'jt'));
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState('adj');
   const ed = useSplitEditor(data, () => setMessage(null));
   const setUnit = (v) => { writePref(UNIT_KEY, v); setUnitState(v); };
 
@@ -318,142 +335,165 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
   };
   const cancel = () => { ed.reset(); setEditing(false); setMessage(null); };
 
-  // One editable month: the mode's own unit, typed in place.
+  // One editable month: the mode's own unit, typed in place. A month that
+  // is not a number is ringed red, matching the check bar's message.
   const input = (key, i, label) => {
     const mode = ed.modes[key];
     const text = ed.cur[key].texts[i];
+    const wrong = ed.draft && ed[key]?.bad?.includes(i);
     return (
-      <span className="pt-in">
-        <input inputMode={mode === 'rp' ? 'numeric' : 'decimal'} aria-label={label} value={mode === 'rp' ? thousands(text) : text} onChange={(e) => ed.type(key, i, e.target.value)} disabled={saving} />
+      <span className={`pt-in${wrong ? ' is-bad' : ''}`}>
+        <input inputMode={mode === 'rp' ? 'numeric' : 'decimal'} aria-label={label} aria-invalid={wrong || undefined} value={mode === 'rp' ? thousands(text) : text} onChange={(e) => ed.type(key, i, e.target.value)} disabled={saving} />
         {mode !== 'rp' && <i>%</i>}
       </span>
     );
   };
+  // The total of an edited column: what the 12 add up to, and how far off.
+  const toneOfSide = (side) => (!side.valid || side.got > (side === ed.sales ? T : P) ? 'is-bad' : side.ok ? 'is-good' : 'is-warn');
   const sumCell = (side, total) => {
     const diff = side.got - total;
-    const tone = !side.valid || diff > 0 ? 'is-bad' : side.ok ? 'is-good' : 'is-warn';
     return (
       <span className="pt-sum">
         <b>{money(side.got)}</b>
-        <span className={`pt-pill ${tone}`}>{!side.valid ? 'Tidak valid' : side.ok ? 'Pas' : `${diff > 0 ? 'Lebih' : 'Kurang'} ${fmtRpShort(Math.abs(diff))}`}</span>
+        <span className={`pt-pill ${toneOfSide(side)}`}>{!side.valid ? 'Tidak valid' : side.ok ? 'Pas' : `${diff > 0 ? 'Lebih' : 'Kurang'} ${fmtRpShort(Math.abs(diff))}`}</span>
       </span>
     );
   };
-  const qSum = (arr, q) => sum([q * 3, q * 3 + 1, q * 3 + 2].map((i) => arr[i]));
+  const shareCell = (side, total) => <span className={`pt-pill is-solid ${toneOfSide(side)}`}>{pct(ratio(side.got, total), 2)}</span>;
+
+  const qIdx = (q) => [q * 3, q * 3 + 1, q * 3 + 2];
+  const qSum = (arr, q) => sum(qIdx(q).map((i) => arr[i]));
   const hSum = (arr, h) => sum(range(h * 6, h * 6 + 6).map((i) => arr[i]));
-  const halves = (arr) => [0, 1].map((h) => ({
-    span: 6,
-    value: money(hSum(arr, h)),
-    note: h ? growthChip(growth(hSum(arr, 1), hSum(arr, 0)), 'dari H1') : null,
-  }));
-  const planBands = (arr) => QUARTERS.map((q) => ({ value: money(qSum(arr, q)), note: q ? growthChip(growth(qSum(arr, q), qSum(arr, q - 1)), 'QoQ') : null }));
+  const qTotal = (arr, q) => <QVal value={money(qSum(arr, q))} note={q ? growthChip(growth(qSum(arr, q), qSum(arr, q - 1)), 'QoQ') : null} />;
+  const hTotal = (arr) => (h) => <QVal value={money(hSum(arr, h))} note={h ? growthChip(growth(hSum(arr, 1), hSum(arr, 0)), 'dari H1') : null} />;
+  const shareMax = (arr, total) => Math.max(0.0001, ...arr.map((v) => ratio(v, total) ?? 0));
 
   // ── Target adjustment ────────────────────────────────────────────────
   const salesIn = editing && canEdit ? ed.modes.sales : null;
   const spendIn = editing && canEdit && hasSpend ? ed.modes.spend : null;
-  const adjRows = [
+  const adjMax = shareMax(adjS, ed.sales.got || T);
+  const adjCols = [
     {
-      id: 'a-target', label: 'Target revenue', hint: unitLabel, key: true, input: salesIn === 'rp',
-      cells: adjS.map((v, i) => (salesIn === 'rp' ? input('sales', i, `Target ${monthLong(months[i].month)}`) : money(v))),
+      id: 'a-target', group: 'Target revenue', label: 'Target', hint: unitLabel, key: true, input: salesIn === 'rp',
+      cell: (i) => (salesIn === 'rp' ? input('sales', i, `Target ${monthLong(months[i].month)}`) : money(adjS[i])),
+      q: (q) => qTotal(adjS, q), h: hTotal(adjS),
       total: salesIn ? sumCell(ed.sales, T) : money(T),
     },
     {
-      id: 'a-share', label: 'Kontribusi', hint: 'porsi setahun', input: salesIn === 'pct',
-      cells: adjS.map((v, i) => (salesIn === 'pct' ? input('sales', i, `Kontribusi ${monthLong(months[i].month)}`) : pct(ratio(v, T), 2))),
-      total: salesIn === 'pct' ? <span className={`pt-pill ${ed.sales.ok ? 'is-good' : 'is-warn'}`}>{pct(ratio(ed.sales.got, T), 2)}</span> : '100%',
+      id: 'a-share', group: 'Target revenue', label: 'Kontribusi', hint: 'porsi setahun', input: salesIn === 'pct',
+      cell: (i) => (salesIn === 'pct' ? input('sales', i, `Kontribusi ${monthLong(months[i].month)}`) : <Share r={ratio(adjS[i], T)} max={adjMax} />),
+      q: (q) => pct(ratio(qSum(adjS, q), T), 1), h: (h) => pct(ratio(hSum(adjS, h), T), 1),
+      total: salesIn === 'pct' ? shareCell(ed.sales, T) : '100%',
     },
-    { id: 'a-growth', detail: true, label: 'Growth bulanan', cells: adjS.map((v, i) => signedTone(i ? growth(v, adjS[i - 1]) : null)), total: '—' },
+    { id: 'a-growth', group: 'Target revenue', detail: true, label: 'Growth', hint: 'vs bulan lalu', cell: (i) => signedTone(i ? growth(adjS[i], adjS[i - 1]) : null) },
     {
-      id: 'a-vs', detail: true, label: 'vs target awal',
-      cells: adjS.map((v, i) => { const g = growth(v, initS[i]); return g == null || Math.abs(g) < 0.0005 ? <span className="pt-dim">tetap</span> : signedTone(g); }),
+      id: 'a-vs', group: 'Target revenue', detail: true, label: 'vs target awal', hint: 'perubahan',
+      cell: (i) => { const g = growth(adjS[i], initS[i]); return g == null || Math.abs(g) < 0.0005 ? <span className="pt-dim">tetap</span> : signedTone(g); },
+      q: (q) => signedTone(growth(qSum(adjS, q), qSum(initS, q))),
       total: signedTone(growth(T, I)),
     },
-    { id: 'a-h', detail: true, label: 'Per semester', spans: halves(adjS), total: money(T) },
     ...(hasSpend ? [
-      { divider: 'Budget iklan' },
       {
-        id: 'a-budget', label: 'Budget iklan', hint: unitLabel, key: true, input: spendIn === 'rp',
-        cells: adjP.map((v, i) => (spendIn === 'rp' ? input('spend', i, `Budget ${monthLong(months[i].month)}`) : money(v))),
+        id: 'a-budget', group: 'Budget iklan', label: 'Budget', hint: unitLabel, key: true, input: spendIn === 'rp',
+        cell: (i) => (spendIn === 'rp' ? input('spend', i, `Budget ${monthLong(months[i].month)}`) : money(adjP[i])),
+        q: (q) => <QVal value={money(qSum(adjP, q))} />, h: (h) => <QVal value={money(hSum(adjP, h))} />,
         total: spendIn ? sumCell(ed.spend, P) : money(P),
       },
       {
-        id: 'a-cpr', label: '% alokasi budget', hint: 'Cost per Revenue', input: spendIn === 'cpr',
-        cells: adjP.map((v, i) => (spendIn === 'cpr' ? input('spend', i, `Alokasi budget ${monthLong(months[i].month)}`) : pct(ratio(v, adjS[i]), 2))),
-        total: pct(ratio(P, T), 2),
+        id: 'a-cpr', group: 'Budget iklan', label: '% alokasi', hint: 'cost per revenue', input: spendIn === 'cpr',
+        cell: (i) => (spendIn === 'cpr' ? input('spend', i, `Alokasi budget ${monthLong(months[i].month)}`) : pct(ratio(adjP[i], adjS[i]), 2)),
+        q: (q) => pct(ratio(qSum(adjP, q), qSum(adjS, q)), 2),
+        total: spendIn === 'cpr' ? <span className={`pt-pill is-solid ${toneOfSide(ed.spend)}`}>{pct(ratio(ed.spend.got, ed.sales.got), 2)}</span> : pct(ratio(P, T), 2),
       },
       ...(spendIn === 'pct' ? [{
-        id: 'a-pshare', label: 'Porsi budget', hint: 'porsi setahun', input: true,
-        cells: adjP.map((v, i) => input('spend', i, `Porsi budget ${monthLong(months[i].month)}`)),
-        total: <span className={`pt-pill ${ed.spend.ok ? 'is-good' : 'is-warn'}`}>{pct(ratio(ed.spend.got, P), 2)}</span>,
+        id: 'a-pshare', group: 'Budget iklan', label: 'Porsi budget', hint: 'porsi setahun', input: true,
+        cell: (i) => input('spend', i, `Porsi budget ${monthLong(months[i].month)}`),
+        q: (q) => pct(ratio(qSum(adjP, q), P), 1),
+        total: shareCell(ed.spend, P),
       }] : []),
-      { id: 'a-roas', detail: true, label: 'Target ROAS', cells: adjP.map((v, i) => xOf(adjS[i], v)), total: xOf(T, P) },
+      { id: 'a-roas', group: 'Budget iklan', detail: true, label: 'Target ROAS', cell: (i) => xOf(adjS[i], adjP[i]), q: (q) => xOf(qSum(adjS, q), qSum(adjP, q)), total: xOf(T, P) },
     ] : []),
-    { divider: 'Harian', detail: true },
-    { id: 'a-daily', detail: true, label: 'Target harian', hint: unitLabel, cells: adjS.map((v, i) => money(v / daysIn(year, i))), total: money(T / (year % 4 ? 365 : 366)) },
-    ...(hasSpend ? [{ id: 'a-dbudget', detail: true, label: 'Budget harian', hint: unitLabel, cells: adjP.map((v, i) => money(v / daysIn(year, i))), total: money(P / (year % 4 ? 365 : 366)) }] : []),
+    { id: 'a-daily', group: 'Harian', detail: true, label: 'Target harian', hint: unitLabel, cell: (i) => money(adjS[i] / daysIn(year, i)), total: money(T / (year % 4 ? 365 : 366)) },
+    ...(hasSpend ? [{ id: 'a-dbudget', group: 'Harian', detail: true, label: 'Budget harian', hint: unitLabel, cell: (i) => money(adjP[i] / daysIn(year, i)), total: money(P / (year % 4 ? 365 : 366)) }] : []),
   ];
 
   // ── Realisasi ─────────────────────────────────────────────────────────
   const chase = [];
   months.forEach((_, i) => { chase.push((chase[i - 1] ?? 0) + (adjS[i] ?? 0) - (actS[i] ?? 0)); });
-  const realBands = QUARTERS.map((q) => {
-    const idx = [q * 3, q * 3 + 1, q * 3 + 2].filter(seen);
-    if (!idx.length) return { value: '—' };
-    const r = ratio(sum(idx.map((i) => actS[i])), qSum(adjS, q));
-    return { value: money(sum(idx.map((i) => actS[i]))), note: <span className={`pt-chip ${toneOf(r, idx.length === 3 && done(q * 3 + 2))}`}>{pct(r, 0)}</span> };
-  });
-  const realRows = [
+  const seenOf = (q) => qIdx(q).filter(seen);
+  const realCols = [
     {
-      id: 'r-real', label: 'Realisasi revenue', hint: unitLabel, key: true,
-      cells: actS.map((v) => money(v)),
-      cellTone: (i) => (actS[i] == null || !done(i) ? '' : actS[i] >= adjS[i] ? 'is-fill-good' : 'is-fill-bad'),
+      id: 'r-real', group: 'Revenue', label: 'Realisasi', hint: unitLabel, key: true,
+      cell: (i) => money(actS[i]),
+      tone: (i) => (actS[i] == null || !done(i) ? '' : actS[i] >= adjS[i] ? 'is-fill-good' : 'is-fill-bad'),
+      q: (q) => { const idx = seenOf(q); return idx.length ? <QVal value={money(sum(idx.map((i) => actS[i])))} /> : <span className="pt-dim">—</span>; },
       total: money(ytd.actual),
     },
     {
-      id: 'r-ach', label: 'Achievement', hint: 'vs adjustment',
-      cells: actS.map((v, i) => { const r = ratio(v, adjS[i]); return r == null ? <span className="pt-dim">—</span> : <AchBar r={r} tone={toneOf(r, done(i))} />; }),
+      id: 'r-ach', group: 'Revenue', label: 'Achievement', hint: 'vs adjustment',
+      cell: (i) => { const r = ratio(actS[i], adjS[i]); return r == null ? <span className="pt-dim">—</span> : <AchBar r={r} tone={toneOf(r, done(i))} />; },
+      q: (q) => {
+        const idx = seenOf(q);
+        if (!idx.length) return <span className="pt-dim">—</span>;
+        const r = ratio(sum(idx.map((i) => actS[i])), qSum(adjS, q));
+        return <AchBar r={r} tone={toneOf(r, idx.length === 3 && done(q * 3 + 2))} />;
+      },
       total: <AchBar r={ratio(ytd.actual, ytd.adj)} tone={toneOf(ratio(ytd.actual, ytd.adj), year < thisYear)} />,
     },
     {
-      id: 'r-chase', label: 'To be chased', hint: 'gap kumulatif',
-      cells: chase.map((v, i) => <span className={i > throughIdx ? 'pt-ghost' : ''}>{gapCell(v, money)}</span>),
+      id: 'r-chase', group: 'Revenue', label: 'To be chased', hint: 'gap kumulatif',
+      cell: (i) => <span className={i > throughIdx ? 'pt-ghost' : ''}>{gapCell(chase[i], money)}</span>,
       total: gapCell(T - ytd.actual, money),
     },
-    { id: 'r-growth', detail: true, label: 'Growth bulanan', cells: actS.map((v, i) => signedTone(i && done(i) ? growth(v, actS[i - 1]) : null)), total: '—' },
-    { id: 'r-ach0', detail: true, label: 'Achievement', hint: 'vs target awal', cells: actS.map((v, i) => pct(ratio(v, initS[i]), 0)), total: pct(ratio(ytd.actual, ytd.init), 1) },
-    { id: 'r-gap', detail: true, label: 'Gap ke target', hint: 'target − realisasi', cells: actS.map((v, i) => (v == null ? <span className="pt-dim">—</span> : gapCell(adjS[i] - v, money))), total: gapCell(ytd.adj - ytd.actual, money) },
-    { divider: 'Budget iklan' },
-    { id: 'r-spend', label: 'Spend iklan riil', hint: unitLabel, key: true, cells: actP.map((v) => money(v)), total: money(ytd.spend) },
+    { id: 'r-growth', group: 'Revenue', detail: true, label: 'Growth', hint: 'vs bulan lalu', cell: (i) => signedTone(i && done(i) ? growth(actS[i], actS[i - 1]) : null) },
+    { id: 'r-ach0', group: 'Revenue', detail: true, label: 'Achievement', hint: 'vs target awal', cell: (i) => pct(ratio(actS[i], initS[i]), 0), total: pct(ratio(ytd.actual, ytd.init), 1) },
+    { id: 'r-gap', group: 'Revenue', detail: true, label: 'Gap ke target', hint: 'target − realisasi', cell: (i) => (actS[i] == null ? <span className="pt-dim">—</span> : gapCell(adjS[i] - actS[i], money)), total: gapCell(ytd.adj - ytd.actual, money) },
     {
-      id: 'r-cpr', label: 'CPR riil', hint: 'cost per revenue',
-      cells: actP.map((v, i) => {
-        const r = ratio(v, actS[i]);
+      id: 'r-spend', group: 'Budget iklan', label: 'Spend riil', hint: unitLabel, key: true, cell: (i) => money(actP[i]),
+      q: (q) => { const idx = seenOf(q); return idx.length ? <QVal value={money(sum(idx.map((i) => actP[i])))} /> : <span className="pt-dim">—</span>; },
+      total: money(ytd.spend),
+    },
+    {
+      id: 'r-cpr', group: 'Budget iklan', label: 'CPR riil', hint: 'cost per revenue',
+      cell: (i) => {
+        const r = ratio(actP[i], actS[i]);
         if (r == null) return <span className="pt-dim">—</span>;
         const plan = ratio(adjP[i], adjS[i]);
         return <span className={plan == null ? '' : r > plan * 1.0005 ? 'pt-bad' : 'pt-good'}>{pct(r, 1)}</span>;
-      }),
+      },
+      q: (q) => { const idx = seenOf(q); return idx.length ? pct(ratio(sum(idx.map((i) => actP[i])), sum(idx.map((i) => actS[i]))), 1) : <span className="pt-dim">—</span>; },
       total: pct(ratio(ytd.spend, ytd.actual), 2),
     },
     ...(hasSpend ? [{
-      id: 'r-burn', detail: true, label: 'Penyerapan budget', hint: 'spend ÷ budget',
-      cells: actP.map((v, i) => { const r = ratio(v, adjP[i]); return r == null ? <span className="pt-dim">—</span> : <span className={r > 1.02 ? 'pt-warn' : ''}>{pct(r, 1)}</span>; }),
+      id: 'r-burn', group: 'Budget iklan', detail: true, label: 'Penyerapan', hint: 'spend ÷ budget',
+      cell: (i) => { const r = ratio(actP[i], adjP[i]); return r == null ? <span className="pt-dim">—</span> : <span className={r > 1.02 ? 'pt-warn' : ''}>{pct(r, 1)}</span>; },
       total: pct(ratio(ytd.spend, ytd.adjSpend), 1),
     }] : []),
-    { id: 'r-roas', detail: true, label: 'ROAS riil', cells: actP.map((v, i) => (v == null ? <span className="pt-dim">—</span> : xOf(actS[i], v))), total: xOf(ytd.actual, ytd.spend) },
+    { id: 'r-roas', group: 'Budget iklan', detail: true, label: 'ROAS riil', cell: (i) => (actP[i] == null ? <span className="pt-dim">—</span> : xOf(actS[i], actP[i])), total: xOf(ytd.actual, ytd.spend) },
   ];
 
   // ── Target awal ───────────────────────────────────────────────────────
-  const initRows = [
-    { id: 'i-target', label: 'Target revenue', hint: unitLabel, key: true, cells: initS.map((v) => money(v)), total: money(I) },
-    { id: 'i-share', label: 'Kontribusi', hint: 'porsi setahun', cells: initS.map((v) => pct(ratio(v, I), 2)), total: '100%' },
-    { id: 'i-growth', detail: true, label: 'Growth bulanan', cells: initS.map((v, i) => signedTone(i ? growth(v, initS[i - 1]) : null)), total: '—' },
-    { id: 'i-h', detail: true, label: 'Per semester', spans: halves(initS), total: money(I) },
+  const initMax = shareMax(initS, I);
+  const initCols = [
+    { id: 'i-target', group: 'Target revenue', label: 'Target', hint: unitLabel, key: true, cell: (i) => money(initS[i]), q: (q) => qTotal(initS, q), h: hTotal(initS), total: money(I) },
+    { id: 'i-share', group: 'Target revenue', label: 'Kontribusi', hint: 'porsi setahun', cell: (i) => <Share r={ratio(initS[i], I)} max={initMax} />, q: (q) => pct(ratio(qSum(initS, q), I), 1), h: (h) => pct(ratio(hSum(initS, h), I), 1), total: '100%' },
+    { id: 'i-growth', group: 'Target revenue', detail: true, label: 'Growth', hint: 'vs bulan lalu', cell: (i) => signedTone(i ? growth(initS[i], initS[i - 1]) : null) },
     ...(IP != null ? [
-      { divider: 'Budget iklan' },
-      { id: 'i-budget', label: 'Budget iklan', hint: unitLabel, key: true, cells: initP.map((v) => money(v)), total: money(IP) },
-      { id: 'i-cpr', label: '% alokasi budget', hint: 'Cost per Revenue', cells: initP.map((v, i) => pct(ratio(v, initS[i]), 2)), total: pct(ratio(IP, I), 2) },
+      { id: 'i-budget', group: 'Budget iklan', label: 'Budget', hint: unitLabel, key: true, cell: (i) => money(initP[i]), q: (q) => <QVal value={money(qSum(initP, q))} />, total: money(IP) },
+      { id: 'i-cpr', group: 'Budget iklan', label: '% alokasi', hint: 'cost per revenue', cell: (i) => pct(ratio(initP[i], initS[i]), 2), q: (q) => pct(ratio(qSum(initP, q), qSum(initS, q)), 2), total: pct(ratio(IP, I), 2) },
     ] : []),
   ];
+
+  // ── The three tables, one at a time ──────────────────────────────────
+  const achYtd = ratio(ytd.actual, ytd.adj);
+  const tabs = [
+    { id: 'adj', tone: 'adj', icon: Crosshair, step: '01', title: 'Target adjustment', feature: 'plan-adjustment', summary: `${fmtRpShort(T)}${hasSpend ? ` · budget ${fmtRpShort(P)}` : ''}` },
+    { id: 'act', tone: 'act', icon: Activity, step: '02', title: 'Realisasi', feature: 'plan-actual', summary: throughIdx >= 0 ? `${pct(achYtd, 0)} achievement s.d. ${MONTH_SHORT[throughIdx]}` : `${year} belum berjalan` },
+    { id: 'init', tone: 'init', icon: Flag, step: '03', title: 'Target awal', feature: 'plan-initial', summary: `${fmtRpShort(I)}${data.initialEstimated ? ' · perkiraan' : ''}` },
+  ];
+  const tabIdx = Math.max(0, tabs.findIndex((t) => t.id === tab));
+  const pickTab = (id) => { if (!editing) setTab(id); };
+  const startEdit = (then) => { setTab('adj'); setEditing(true); setMessage(null); then?.(); };
 
   const editTools = editing && (
     <div className="ps-edit">
@@ -466,11 +506,49 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
         {hasSpend && <button type="button" className="tb-link" onClick={ed.followTarget} disabled={saving}><Link2 size={14} aria-hidden="true" /> Budget ikuti target · {pct(ed.yearRatio, 2)}</button>}
       </div>
       <p className="ps-edit-hint">
-        Sel kuning bisa diisi. {ed.modes.spend === 'cpr' && hasSpend ? 'Budget = % × target bulan itu, jadi ikut berubah saat target diubah. ' : ''}
+        Kolom kuning bisa diisi. {ed.modes.spend === 'cpr' && hasSpend ? 'Budget = % alokasi × target bulan itu, jadi ikut berubah saat target diubah. ' : ''}
         Total 12 bulan harus pas {fmtRp(T)}{hasSpend ? ` dan ${fmtRp(P)}` : ''}.{updates === 0 ? ' Belum ada update, jadi target awal ikut berubah.' : ''}
       </p>
     </div>
   );
+
+  const panels = {
+    adj: {
+      sub: updates > 0 ? `Berlaku sekarang · ${updates} update${lastUpdate ? `, terakhir mulai ${monthLong(lastUpdate.effectiveMonth)}` : ''}` : 'Berlaku sekarang · belum ada update',
+      cols: adjCols,
+      actions: canEdit && !editing ? (
+        <button type="button" className="bp-primary ps-edit-btn" onClick={() => startEdit()}>
+          <PencilLine size={15} aria-hidden="true" /> Atur pembagian
+        </button>
+      ) : editing ? <span className="ps-editing"><i aria-hidden="true" /> Sedang diatur</span> : null,
+      banner: (
+        <>
+          {editTools}
+          {hasSpend && !ed.followsTarget && !ed.draft && (
+            <div className="ps-banner">
+              <Link2 size={16} aria-hidden="true" />
+              <p><b>Budget belum mengikuti target.</b> Bulan dengan target besar dapat budget yang sama dengan bulan kecil. Dengan {pct(ed.yearRatio, 2)} dari target tiap bulan, totalnya tetap {fmtRp(P)}.</p>
+              {canEdit && <button type="button" className="bp-ghost" onClick={() => startEdit(ed.followTarget)}>Ikuti target</button>}
+            </div>
+          )}
+        </>
+      ),
+      footer: editing ? <SplitCheck ed={ed} T={T} P={P} saving={saving} onSave={save} onCancel={cancel} /> : null,
+    },
+    act: {
+      sub: throughIdx >= 0 ? `Input harian Brand Tracking · s.d. ${monthLong(months[throughIdx].month)}` : `${year} belum berjalan`,
+      cols: realCols,
+      futureFrom: throughIdx + 1,
+    },
+    init: {
+      sub: data.initialEstimated
+        ? 'Sebelum tahun berjalan · per bulan diperkirakan (dibagi rata), pembagiannya belum tersimpan saat update'
+        : `Sebelum tahun berjalan${original ? ` · disusun ${new Date(original.createdAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}${data.corrected ? ' · dikoreksi' : ''}`,
+      cols: initCols,
+    },
+  };
+  const active = tabs[tabIdx];
+  const panel = panels[active.id];
 
   return (
     <>
@@ -488,55 +566,38 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
       <header className="tb-head">
         <div>
           <h2>Rencana per bulan · {year}</h2>
-          <p>Target adjustment, realisasi, dan target awal untuk 12 bulan. Pembagian target dan budget diatur di tabel pertama.</p>
+          <p>Tiga tabel untuk 12 bulan: target yang berlaku, realisasinya, dan target awal sebelum ada update. Pembagian target dan budget diatur di Target adjustment.</p>
         </div>
       </header>
 
       {message && <p className={`tb-msg is-${message.tone}`} role={message.tone === 'error' ? 'alert' : 'status'}>{message.text}</p>}
 
-      <Sheet
-        tone="adj" icon={Crosshair} title="Target adjustment" feature="plan-adjustment" step="01"
-        sub={updates > 0 ? `Berlaku sekarang · ${updates} update${lastUpdate ? `, terakhir mulai ${monthLong(lastUpdate.effectiveMonth)}` : ''}` : 'Berlaku sekarang · belum ada update'}
-        editing={editing}
-        actions={canEdit && !editing ? (
-          <button type="button" className="bp-primary ps-edit-btn" onClick={() => { setEditing(true); setMessage(null); }}>
-            <PencilLine size={15} aria-hidden="true" /> Atur pembagian
-          </button>
-        ) : editing ? (
-          <div className="at-actions">
-            <button type="button" className="bp-ghost" onClick={cancel} disabled={saving}><X size={15} aria-hidden="true" /> Batal</button>
-            <button type="button" className="bp-primary" onClick={save} disabled={saving || !ed.ok || !ed.draft} title={!ed.ok ? 'Total 12 bulan harus pas dengan target dan budget setahun' : undefined}>
-              {saving ? <Loader2 size={15} className="dt-spin" /> : <Check size={15} />} Simpan
+      <div className="pv-tabs" role="tablist" aria-label="Tabel rencana" style={{ '--n': tabs.length, '--at': tabIdx }}>
+        <span className="pv-ink" aria-hidden="true" />
+        {tabs.map((t) => {
+          const Icon = t.icon;
+          const on = t.id === active.id;
+          const locked = editing && !on;
+          return (
+            <button
+              key={t.id} type="button" role="tab" id={`pv-tab-${t.id}`} aria-selected={on} aria-controls={`pv-panel-${t.id}`}
+              className={`pv-tab is-${t.tone}${on ? ' is-on' : ''}`} data-feature={t.feature}
+              onClick={() => pickTab(t.id)} aria-disabled={locked || undefined} title={locked ? 'Simpan atau batalkan pembagian dulu' : undefined}
+            >
+              <span className="pv-tab-icon" aria-hidden="true"><Icon size={16} /></span>
+              <span className="pv-tab-text">
+                <span className="pv-tab-title"><em>{t.step}</em>{t.title}</span>
+                <small>{t.summary}</small>
+              </span>
             </button>
-          </div>
-        ) : null}
-        banner={(
-          <>
-            {editTools}
-            {hasSpend && !ed.followsTarget && !ed.draft && (
-              <div className="ps-banner">
-                <Link2 size={16} aria-hidden="true" />
-                <p><b>Budget belum mengikuti target.</b> Bulan dengan target besar dapat budget yang sama dengan bulan kecil. Dengan {pct(ed.yearRatio, 2)} dari target tiap bulan, totalnya tetap {fmtRp(P)}.</p>
-                {canEdit && <button type="button" className="bp-ghost" onClick={() => { setEditing(true); ed.followTarget(); }}>Ikuti target</button>}
-              </div>
-            )}
-          </>
-        )}
-        bands={planBands(adjS)} rows={adjRows} year={year} currentIdx={currentIdx} unit={unit}
-      />
+          );
+        })}
+      </div>
 
-      <Sheet
-        tone="act" icon={Activity} title="Realisasi" feature="plan-actual" step="02"
-        sub={throughIdx >= 0 ? `Input harian Brand Tracking · s.d. ${monthLong(months[throughIdx].month)}` : `${year} belum berjalan`}
-        bands={realBands} rows={realRows} year={year} currentIdx={currentIdx} unit={unit}
-      />
-
-      <Sheet
-        tone="init" icon={Flag} title="Target awal" feature="plan-initial" step="03"
-        sub={data.initialEstimated
-          ? 'Sebelum tahun berjalan · per bulan diperkirakan (dibagi rata), pembagiannya belum tersimpan saat update'
-          : `Sebelum tahun berjalan${original ? ` · disusun ${new Date(original.createdAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}` : ''}${data.corrected ? ' · dikoreksi' : ''}`}
-        bands={planBands(initS)} rows={initRows} year={year} currentIdx={currentIdx} unit={unit}
+      <PlanPanel
+        key={active.id} id={active.id} tone={active.tone} title={active.title} sub={panel.sub}
+        actions={panel.actions} banner={panel.banner} footer={panel.footer} editing={active.id === 'adj' && editing}
+        cols={panel.cols} currentIdx={currentIdx} futureFrom={panel.futureFrom} unit={unit}
       />
 
       <p className="tb-foot">
@@ -657,16 +718,152 @@ function PlanHero({ year, T, P, I, IP, ytd, updates, lastUpdate, corrected, thro
   );
 }
 
-// One block of the sheet: its header, and the months table with the rows
-// that matter on show; growth, daily figures and the like behind "Detail".
-function Sheet({ tone, icon: Icon, title, sub, step, actions, banner, editing, feature, bands, rows, year, currentIdx, unit }) {
-  const [detail, setDetail] = useState(false);
-  const hidden = rows.filter((r) => r.detail && !r.divider).length;
-  const shown = rows.filter((r) => detail || !r.detail);
+// A quarter's or half's figure with its change beside it.
+function QVal({ value, note }) {
+  return <span className="mt-qv"><b>{value}</b>{note}</span>;
+}
+// A month's share of the year, with a bar scaled to the largest month.
+function Share({ r, max }) {
+  if (r == null) return <span className="pt-dim">—</span>;
   return (
-    <section className={`ps-sheet is-${tone}${editing ? ' is-editing' : ''}`} data-feature={feature} aria-label={title}>
+    <span className="mt-share">
+      <i aria-hidden="true"><em style={{ transform: `scaleX(${Math.min(r / max, 1)})` }} /></i>
+      <b>{pct(r, 2)}</b>
+    </span>
+  );
+}
+
+// ── The check under the split being edited ───────────────────────────
+// Whether the 12 months add up to the year, said in words: how far over or
+// under, in the unit the person is typing, what to do about it, and a
+// one-click fix. Simpan stays pressable: pressed too early it points at
+// what is still off instead of doing nothing.
+const LIST = new Intl.ListFormat('id-ID', { style: 'long', type: 'conjunction' });
+const monthsList = (idx) => LIST.format(idx.slice(0, 4).map((i) => MONTH_LONG[i])) + (idx.length > 4 ? ` dan ${idx.length - 4} bulan lain` : '');
+
+function checkOf(kind, mode, side, total, yearRatio) {
+  const what = kind === 'sales' ? 'target' : 'budget';
+  const r = total ? side.got / total : null;
+  if (!side.valid) {
+    return { state: 'invalid', r, title: `Isian ${what} ${monthsList(side.bad)} bukan angka`, text: 'Pakai angka saja; desimal dengan koma, misalnya 8,5.' };
+  }
+  if (side.ok) {
+    return { state: 'ok', r: 1, title: 'Pas', text: `12 bulan = ${fmtRp(total)}, sama dengan ${what} setahun.` };
+  }
+  const diff = side.got - total;
+  const over = diff > 0;
+  const gap = Math.abs(diff);
+  const word = over ? 'lebih' : 'kurang';
+  const gapPct = pct(gap / total, 2);
+  if (kind === 'spend' && mode === 'cpr') {
+    return {
+      state: over ? 'over' : 'under', r,
+      title: `Budget ${word} ${fmtRpShort(gap)} dari setahun`,
+      text: `% alokasi × target = ${fmtRp(side.got)}, budget setahun ${fmtRp(total)}. ${over ? 'Turunkan' : 'Naikkan'} % alokasi di beberapa bulan.`,
+    };
+  }
+  const name = kind === 'sales' ? 'kontribusi' : 'porsi budget';
+  return {
+    state: over ? 'over' : 'under', r,
+    title: mode === 'pct' ? `Total ${name} ${pct(r, 2)}, ${word} ${gapPct}` : `Total ${what} ${word} ${fmtRp(gap)}`,
+    text: `12 bulan = ${fmtRp(side.got)}, ${what} setahun ${fmtRp(total)}. ${over ? 'Kurangi' : 'Tambahkan'} ${mode === 'pct' ? gapPct : fmtRp(gap)} di bulan mana saja.`,
+  };
+}
+
+function SplitCheck({ ed, T, P, saving, onSave, onCancel }) {
+  const [nudge, setNudge] = useState(0);
+  useEffect(() => {
+    if (!nudge) return undefined;
+    const id = setTimeout(() => setNudge(0), 700);
+    return () => clearTimeout(id);
+  }, [nudge]);
+
+  const items = [
+    { key: 'sales', label: 'Target revenue', ...checkOf('sales', ed.modes.sales, ed.sales, T, null) },
+    ...(ed.hasSpend ? [{ key: 'spend', label: 'Budget iklan', ...checkOf('spend', ed.modes.spend, ed.spend, P, ed.yearRatio) }] : []),
+  ];
+  const open = items.filter((it) => it.state !== 'ok');
+  const changed = !!ed.draft;
+  const ready = changed && ed.ok;
+  const state = !changed ? 'idle' : ready ? 'ok' : 'blocked';
+  const head = {
+    idle: ['Belum ada perubahan', 'Ubah angka di kolom kuning. Totalnya dicek di sini setiap kali Anda mengetik.'],
+    ok: ['Siap disimpan', `Total 12 bulan sudah pas dengan ${ed.hasSpend ? 'target dan budget' : 'target'} setahun.`],
+    blocked: ['Belum bisa disimpan', `${open.map((it) => it.label).join(' dan ')} belum pas 100%.`],
+  }[state];
+
+  const press = () => {
+    if (saving) return;
+    if (ready) onSave();
+    else setNudge((n) => n + 1);
+  };
+
+  return (
+    <div className={`sc is-${state}${nudge ? ' is-nudge' : ''}`} role="region" aria-label="Cek total pembagian">
+      <div className="sc-head" aria-live="polite">
+        <span className="sc-badge" aria-hidden="true">{state === 'ok' ? <Check size={16} strokeWidth={2.6} /> : state === 'blocked' ? <AlertTriangle size={16} /> : <PencilLine size={15} />}</span>
+        <div>
+          <b>{head[0]}</b>
+          <small>{head[1]}</small>
+        </div>
+      </div>
+
+      <div className="sc-items">
+        {items.map((it) => {
+          const fill = it.r == null ? 0 : Math.min(it.r, 1.2) / 1.2;
+          return (
+            <div key={it.key} className={`sc-item is-${it.state}`}>
+              <div className="sc-top">
+                <span className="sc-label">{it.label}</span>
+                <span className="sc-meter" aria-hidden="true">
+                  <i style={{ transform: `scaleX(${fill})` }} />
+                  <em title="100%" />
+                </span>
+                <span className="sc-fig">{it.state === 'invalid' ? '—' : pct(it.r, 2)}</span>
+              </div>
+              <p><b>{it.title}.</b> {it.text}</p>
+              {(it.state === 'over' || it.state === 'under') && (
+                <div className="sc-fixes">
+                  <button type="button" className="sc-fix" onClick={() => ed.fit(it.key)} disabled={saving}>
+                    <Wand2 size={13} aria-hidden="true" /> Jadikan 100%
+                  </button>
+                  {it.key === 'spend' && ed.modes.spend === 'cpr' && (
+                    <button type="button" className="sc-fix is-quiet" onClick={ed.followTarget} disabled={saving}>
+                      <Link2 size={13} aria-hidden="true" /> Samakan ke {pct(ed.yearRatio, 2)}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="sc-actions">
+        <button type="button" className="bp-ghost" onClick={onCancel} disabled={saving}><X size={15} aria-hidden="true" /> Batal</button>
+        <button
+          type="button" className={`bp-primary sc-save${ready ? '' : ' is-blocked'}`} onClick={press} aria-disabled={!ready || saving || undefined}
+          title={ready ? undefined : head[1]}
+        >
+          {saving ? <Loader2 size={15} className="dt-spin" /> : <Check size={15} />} Simpan
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── One table: its header, then the months down the side ─────────────
+// Growth, daily figures and the like hide behind "Kolom detail".
+function PlanPanel({ id, tone, title, sub, actions, banner, footer, editing, cols, currentIdx, futureFrom, unit }) {
+  const [detail, setDetail] = useState(false);
+  const hidden = cols.filter((c) => c.detail).length;
+  const shown = cols.filter((c) => detail || !c.detail);
+  return (
+    <section
+      id={`pv-panel-${id}`} role="tabpanel" aria-labelledby={`pv-tab-${id}`}
+      className={`ps-sheet is-${tone}${editing ? ' is-editing' : ''}`} aria-label={title}
+    >
       <header className="ps-head">
-        <span className="ps-icon" aria-hidden="true"><Icon size={16} /><em>{step}</em></span>
         <div className="ps-title">
           <h3>{title}</h3>
           <p>{sub}</p>
@@ -674,7 +871,7 @@ function Sheet({ tone, icon: Icon, title, sub, step, actions, banner, editing, f
         <div className="ps-actions">
           {hidden > 0 && (
             <button type="button" className={`ps-detail${detail ? ' is-on' : ''}`} aria-expanded={detail} onClick={() => setDetail((d) => !d)}>
-              <ChevronDown size={14} aria-hidden="true" /> {detail ? 'Ringkas' : `Detail · ${hidden} baris`}
+              <ChevronDown size={14} aria-hidden="true" /> {detail ? 'Sembunyikan detail' : `Kolom detail · ${hidden}`}
             </button>
           )}
           {actions}
@@ -682,60 +879,73 @@ function Sheet({ tone, icon: Icon, title, sub, step, actions, banner, editing, f
       </header>
       {banner}
       <div className="ps-scroll">
-        <SheetTable year={year} currentIdx={currentIdx} rows={shown} bands={bands} unit={unit} />
+        <MonthTable cols={shown} detail={detail} currentIdx={currentIdx} futureFrom={futureFrom} unit={unit} />
       </div>
+      {footer}
     </section>
   );
 }
 
-// Months across, figures down. The quarter band carries each quarter's
-// total; the running month is lit down the whole column; the labels and the
-// year's total stay put while the months scroll.
-function SheetTable({ year, currentIdx, rows, bands, unit }) {
-  const colCls = (i) => `${i % 3 === 0 ? ' is-qstart' : ''}${i === currentIdx ? ' is-now' : ''}`;
+// Months down, figures across, grouped under Target / Budget headings.
+// Each quarter opens with its own totals; the running month is lit.
+function MonthTable({ cols, detail, currentIdx, futureFrom = 12, unit }) {
+  const groups = [];
+  cols.forEach((c) => {
+    const last = groups[groups.length - 1];
+    if (last && last.name === c.group) last.span += 1;
+    else groups.push({ name: c.group, span: 1 });
+  });
+  const startsGroup = new Set(cols.flatMap((c, k) => (k && c.group !== cols[k - 1].group ? [k] : [])));
+  const colCls = (c, k) => `${c.key ? ' is-key' : ''}${c.input ? ' is-input' : ''}${k && startsGroup.has(k) ? ' is-gstart' : ''}`;
+  const halves = detail && cols.some((c) => c.h);
+  let n = 0;
   return (
-    <table className={`pt-table${unit === 'jt' ? ' is-jt' : ''}`}>
+    <table className={`mt${unit === 'jt' ? ' is-jt' : ''}`}>
       <thead>
-        <tr className="pt-qrow">
-          <th rowSpan={2} className="pt-corner" scope="col"><b>{year}</b></th>
-          {QUARTERS.map((q) => (
-            <th key={q} colSpan={3} scope="colgroup" className="pt-q">
-              <span className="pt-qband">
-                <span className="pt-qname">Q{q + 1}</span>
-                <span className="pt-qval">{bands[q].value}</span>
-                {bands[q].note}
-              </span>
+        {groups.length > 1 && (
+          <tr className="mt-groups">
+            <th aria-hidden="true" className="mt-month" />
+            {groups.map((g, k) => <th key={g.name} colSpan={g.span} scope="colgroup" className={k ? 'is-gstart' : ''}><span>{g.name}</span></th>)}
+          </tr>
+        )}
+        <tr className="mt-cols">
+          <th scope="col" className="mt-month">Bulan</th>
+          {cols.map((c, k) => (
+            <th key={c.id} scope="col" className={colCls(c, k)}>
+              {c.label}{c.hint && <small>{c.hint}</small>}
             </th>
-          ))}
-          <th rowSpan={2} className="pt-total" scope="col">Total</th>
-        </tr>
-        <tr className="pt-mrow">
-          {MONTH_SHORT.map((m, i) => (
-            <th key={m} scope="col" className={`pt-m${colCls(i)}`}>{m}{i === currentIdx && <em title="Bulan berjalan" aria-label="bulan berjalan" />}</th>
           ))}
         </tr>
       </thead>
-      <tbody>
-        {rows.map((r, n) => {
-          if (r.divider) {
-            return (
-              <tr key={`d-${r.divider}-${n}`} className="pt-divider">
-                <th scope="rowgroup" className="pt-label">{r.divider}</th>
-                <td colSpan={13} />
-              </tr>
-            );
-          }
-          return (
-            <tr key={r.id} className={`${r.key ? 'is-key' : ''}${r.input ? ' is-input' : ''}${r.detail ? ' is-detail' : ''}`}>
-              <th scope="row" className="pt-label">{r.label}{r.hint && <small>{r.hint}</small>}</th>
-              {r.spans
-                ? r.spans.map((s, k) => <td key={k} colSpan={s.span} className={`pt-spancell${k ? ' is-qstart' : ''}`}><b>{s.value}</b>{s.note}</td>)
-                : r.cells.map((c, i) => <td key={i} className={`pt-c${colCls(i)}${r.cellTone ? ` ${r.cellTone(i)}` : ''}`}>{c}</td>)}
-              <td className="pt-total">{r.total}</td>
+      {QUARTERS.map((q) => (
+        <tbody key={q} className="mt-quarter">
+          <tr className="mt-q" style={{ '--r': n++ }}>
+            <th scope="rowgroup" className="mt-month"><span className="mt-qname">Q{q + 1}</span><small>{MONTH_SHORT[q * 3]}–{MONTH_SHORT[q * 3 + 2]}</small></th>
+            {cols.map((c, k) => <td key={c.id} className={colCls(c, k)}>{c.q ? c.q(q) : null}</td>)}
+          </tr>
+          {[q * 3, q * 3 + 1, q * 3 + 2].map((i) => (
+            <tr key={i} className={`mt-m${i === currentIdx ? ' is-now' : ''}${i >= futureFrom ? ' is-future' : ''}`} style={{ '--r': n++ }}>
+              <th scope="row" className="mt-month">
+                <b>{MONTH_LONG[i]}</b>
+                {i === currentIdx && <span className="mt-now">berjalan</span>}
+              </th>
+              {cols.map((c, k) => <td key={c.id} className={`${colCls(c, k)}${c.tone ? ` ${c.tone(i)}` : ''}`}>{c.cell(i)}</td>)}
             </tr>
-          );
-        })}
-      </tbody>
+          ))}
+        </tbody>
+      ))}
+      <tfoot>
+        {halves && [0, 1].map((h) => (
+          <tr key={h} className="mt-h">
+            <th scope="row" className="mt-month">{h ? 'Semester 2' : 'Semester 1'}<small>{h ? 'Jul–Des' : 'Jan–Jun'}</small></th>
+            {cols.map((c, k) => <td key={c.id} className={colCls(c, k)}>{c.h ? c.h(h) : null}</td>)}
+          </tr>
+        ))}
+        <tr className="mt-total">
+          <th scope="row" className="mt-month">Total setahun</th>
+          {cols.map((c, k) => <td key={c.id} className={colCls(c, k)}>{c.total ?? <span className="pt-dim">—</span>}</td>)}
+        </tr>
+      </tfoot>
     </table>
   );
 }

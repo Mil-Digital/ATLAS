@@ -26,6 +26,14 @@ export const SHOW_FOR_DAYS = 60;
 
 export const WHATS_NEW = [
   {
+    id: 'annual-plan-split-check',
+    released: '2026-11-11',
+    path: '/brand-tracking',
+    target: '[data-feature="plan-adjustment"]',
+    title: 'Rencana per bulan: tiga tabel dan cek total',
+    body: 'Target adjustment, Realisasi, dan Target awal kini tabel terpisah dengan bulan menurun ke bawah. Saat mengatur pembagian, panel cek menunjukkan total kontribusi dan budget, lebih atau kurang berapa dari 100%, dan tombol "Jadikan 100%" untuk menyesuaikan otomatis.',
+  },
+  {
     id: 'meta-pull-progress',
     released: '2026-11-10',
     path: '/data-brand',
