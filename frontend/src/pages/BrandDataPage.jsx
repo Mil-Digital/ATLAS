@@ -177,6 +177,7 @@ const PERIOD_SOURCE_LABEL = {
   rows: 'periode dari isi baris',
   none: 'periode mengikuti slot bulan',
   import: 'periode dari hasil impor',
+  overview: 'periode dicocokkan ke Performance Overview',
   mismatch: '⚠ periode file DI LUAR bulan ini',
 };
 
@@ -263,6 +264,17 @@ function needsImport(channel, file) {
   // it never reached the Dashboard, so it gets the "Impor ulang" button too.
   if (file.import_status === 'success') return file.import_rows === 0;
   return file.import_status === 'failed' || file.dashboard_upload_id == null;
+}
+
+// A Product Performance file already in the Dashboard but still shown as a
+// monthly snapshot: re-importing lets the server match its days against that
+// month's Performance Overview (once that file is in). Not a failure, so it
+// gets the button without the "BELUM masuk Dashboard" label.
+function canMatchDays(channel, file) {
+  return channel === 'product_performance'
+    && file.import_status === 'success'
+    && file.import_rows > 0
+    && !(file.covered_days > 0);
 }
 
 function failedImports(channel, parts) {
@@ -619,6 +631,12 @@ function DatasetRow({ platform, dataset, months, lookup, index, reduced, onPick,
                       {needsImport(dataset.channel, file) && (
                         <button type="button" className="is-retry" onClick={() => onReimport(file)} disabled={busyKey === `import-${file.id}`}>
                           {busyKey === `import-${file.id}` ? 'Mengimpor…' : <><RefreshCw size={14} /> Impor ulang</>}
+                        </button>
+                      )}
+                      {!needsImport(dataset.channel, file) && canMatchDays(dataset.channel, file) && (
+                        <button type="button" onClick={() => onReimport(file)} disabled={busyKey === `import-${file.id}`}
+                          title="Impor ulang untuk mencocokkan tanggalnya dengan Performance Overview bulan ini">
+                          {busyKey === `import-${file.id}` ? 'Membaca…' : <><RefreshCw size={14} /> Baca tanggal</>}
                         </button>
                       )}
                       {!dataset.autoOnly && <button type="button" onClick={() => onPick(dataset, month, file)}><Upload size={14} /> Ganti</button>}
@@ -1222,14 +1240,13 @@ export default function BrandDataPage() {
       const { data } = await api.post(`/brands/${brand.brand_id}/library/${file.id}/import`);
       await loadBrand(brand.brand_id);
       setError(null);
-      // 0 baris bukan kegagalan: importer melewati baris yang sudah ada
-      // (ON CONFLICT DO NOTHING), jadi periode yang datanya sudah lengkap
-      // memang tidak menambah apa pun. Mengatakan "0 baris" tanpa penjelasan
-      // membuat orang mengira impornya tidak jalan.
+      // Impor ulang menimpa baris periode yang sama dan mengambil alih
+      // kepemilikannya, jadi jumlah barisnya adalah isi file itu sendiri.
       const n = data.imported.rowsInserted;
+      const days = data.imported.coverage?.source === 'overview' ? data.imported.coverage.coveredDays : 0;
       setNotice(n > 0
-        ? `${file.original_filename}: ${n.toLocaleString('id-ID')} baris masuk ke Dashboard.`
-        : `${file.original_filename}: tidak ada baris baru — datanya memang sudah ada di Dashboard. Status sekarang tercatat benar.`);
+        ? `${file.original_filename}: ${n.toLocaleString('id-ID')} baris masuk ke Dashboard${days ? ` · tanggal terbaca ${days} hari (dicocokkan ke Performance Overview)` : ''}.`
+        : `${file.original_filename}: tidak ada baris yang terbaca dari file ini.`);
     } catch (err) {
       setNotice({ tone: 'error', text: describeError(err, `Impor ulang ${file.original_filename} gagal`) });
     } finally {

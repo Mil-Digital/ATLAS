@@ -319,7 +319,9 @@ export async function syncCoverageFromImport(fileId, range, monthKey) {
   // Nol hari setelah dipotong ke bulan slotnya berarti rentang file memang di
   // luar bulan itu — bukan "snapshot tanpa tanggal". Menandainya 'import'
   // akan menghapus satu-satunya petunjuk bahwa filenya salah slot.
-  const source = summary.coveredDays === 0 ? 'mismatch' : 'import';
+  // range.source = 'overview' when the range was matched from Performance
+  // Overview sales (Product Performance carries no dates of its own).
+  const source = summary.coveredDays === 0 ? 'mismatch' : (range.source ?? 'import');
   const result = await pool.query(
     `UPDATE ads_reports.brand_library_files
      SET period_start = $2, period_end = $3, covered_days = $4, day_bitmap = $5, period_source = $6, updated_at = now()

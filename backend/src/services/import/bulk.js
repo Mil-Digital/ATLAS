@@ -21,6 +21,29 @@ export async function insertChunked(client, table, columns, rows, conflictSql, c
   return affected;
 }
 
+// "ON CONFLICT (keys) DO UPDATE SET <every other column> = EXCLUDED.…".
+//
+// For the per-day / per-period fact tables the newest import of a key must
+// win and take ownership (upload_id). With DO NOTHING, rows written by an
+// import that committed but never got linked to its library file — the
+// request died on Vercel's time limit after COMMIT — stayed owned by an
+// upload nobody can delete; every "Impor ulang" then collided on all of them,
+// inserted 0 rows and reported success, and the month never recovered.
+export function upsertSql(columns, keys, returning = 'id') {
+  const sets = columns
+    .filter((c) => !keys.includes(c))
+    .map((c) => `${c} = EXCLUDED.${c}`)
+    .join(', ');
+  return `ON CONFLICT (${keys.join(', ')}) DO UPDATE SET ${sets} RETURNING ${returning}`;
+}
+
+// Same as dedupeBy, keyed on several columns (by index).
+export function dedupeByKeys(rows, keyIndexes) {
+  const seen = new Map();
+  for (const row of rows) seen.set(keyIndexes.map((i) => String(row[i])).join('\u0000'), row);
+  return [...seen.values()];
+}
+
 // ON CONFLICT DO UPDATE menolak menyentuh baris yang sama dua kali dalam satu
 // statement ("cannot affect row a second time"), sedangkan satu file ekspor
 // wajar memuat kunci yang sama lebih dari sekali (produk dengan beberapa
