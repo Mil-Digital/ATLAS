@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertTriangle, ArrowUpRight, Check, ChevronDown, History, Link2, Loader2, PencilLine, Scale, Wand2, X,
@@ -31,7 +31,6 @@ import './annualTarget.css';
 // change, and offers to scale the months onto 100%.
 
 const MODES_KEY = 'atlas.annualPlan.modes';
-const UNIT_KEY = 'atlas.annualPlan.unit';
 const SALES_MODES = [['pct', 'Kontribusi %'], ['rp', 'Nominal']];
 const SPEND_MODES = [['cpr', '% dari target'], ['pct', 'Porsi %'], ['rp', 'Nominal']];
 const QUARTERS = [0, 1, 2, 3];
@@ -270,11 +269,9 @@ export default function AnnualPlan({ brandId, month, canEdit, onSaved, children 
 }
 
 function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, children }) {
-  const [unit, setUnitState] = useState(() => readPref(UNIT_KEY, 'jt', (v) => v === 'full' || v === 'jt'));
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
   const ed = useSplitEditor(data, () => setMessage(null));
-  const setUnit = (v) => { writePref(UNIT_KEY, v); setUnitState(v); };
 
   const annual = data.annual;
   const original = data.original;
@@ -310,11 +307,10 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
   const I = sum(initS);
   const IP = initP.some((v) => v != null) ? sum(initP) : null;
 
-  const money = (v) => {
-    if (v == null || !Number.isFinite(v)) return '—';
-    return unit === 'jt' ? (v / 1e6).toLocaleString('id-ID', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : Math.round(v).toLocaleString('id-ID');
-  };
-  const unitLabel = unit === 'jt' ? 'Rp juta' : 'Rp';
+  // Rupiah in full in the summary view, in millions once Detail adds its
+  // columns: each table decides (see PlanPanel), the cells just ask.
+  const money = (v) => <Money v={v} />;
+  const unitLabel = <UnitLabel />;
 
   const save = async () => {
     setSaving(true);
@@ -363,6 +359,8 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
   const qIdx = (q) => [q * 3, q * 3 + 1, q * 3 + 2];
   const qSum = (arr, q) => sum(qIdx(q).map((i) => arr[i]));
   const hSum = (arr, h) => sum(range(h * 6, h * 6 + 6).map((i) => arr[i]));
+  // A quarter's target against the one before, said where there is room.
+  const qGrowth = (arr, q) => (q ? <span className="mt-qgrowth">Target {growthChip(growth(qSum(arr, q), qSum(arr, q - 1)), 'QoQ')}</span> : null);
   const qTotal = (arr, q) => <QVal value={money(qSum(arr, q))} note={q ? growthChip(growth(qSum(arr, q), qSum(arr, q - 1)), 'QoQ') : null} />;
   const hTotal = (arr) => (h) => <QVal value={money(hSum(arr, h))} note={h ? growthChip(growth(hSum(arr, 1), hSum(arr, 0)), 'dari H1') : null} />;
   // One scale for every bar in the three tables, so a month reads the same
@@ -510,8 +508,8 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
   const seenSum = (arr, q) => sum(seenOf(q).map((i) => arr[i]));
   const dim = <span className="pt-dim">—</span>;
   const mainCols = [
-    { ...Rl['r-viz'], group: 'Revenue', legend: [['bar', 'Realisasi'], ['tick', 'Target']] },
-    { ...A['a-target'], group: 'Revenue', label: 'Target' },
+    { ...Rl['r-viz'], group: 'Revenue', legend: [['bar', 'Realisasi'], ['tick', 'Target']], q: (q) => qGrowth(adjS, q) },
+    { ...A['a-target'], group: 'Revenue', label: 'Target', q: (q) => <QVal value={money(qSum(adjS, q))} /> },
     { ...Rl['r-real'], group: 'Revenue', label: 'Realisasi', key: false },
     { ...Rl['r-ach'], group: 'Revenue', label: 'Achv.', hint: 'vs target' },
     { ...A['a-share'], group: 'Kontribusi', label: 'Rencana', hint: '% setahun' },
@@ -531,7 +529,9 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
       .map((id) => ({ ...(A[id] ?? Rl[id]), group: 'Detail', detail: true })),
   ];
   const awalCols = [
-    ...initCols.filter((c) => !c.detail),
+    ...initCols.filter((c) => !c.detail).map((c) => (
+      c.id === 'i-viz' ? { ...c, q: (q) => qGrowth(initS, q) }
+        : c.id === 'i-target' ? { ...c, q: (q) => <QVal value={money(qSum(initS, q))} /> } : c)),
     ...(updates > 0 ? [{
       id: 'i-vs', group: 'Perubahan', label: 'Adjustment', hint: 'vs target awal',
       cell: (i) => { const g = growth(adjS[i], initS[i]); return g == null || Math.abs(g) < 0.0005 ? <span className="pt-dim">tetap</span> : signedTone(g); },
@@ -619,7 +619,7 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
       <PlanHero
         year={year} T={T} P={P} I={I} IP={IP} ytd={ytd} updates={updates} lastUpdate={lastUpdate} corrected={data.corrected}
         throughIdx={throughIdx} currentIdx={currentIdx} adjS={adjS} actS={actS} initS={initS} done={done}
-        hasSpend={hasSpend} unit={unit} setUnit={setUnit}
+        hasSpend={hasSpend}
       />
     </section>
 
@@ -667,12 +667,12 @@ function PlanBody({ data, brandId, year, canEdit, message, setMessage, onSaved, 
       <PlanPanel
         id="main" tone="adj" title="Target vs realisasi" sub={mainPanel.sub}
         actions={mainPanel.actions} banner={mainPanel.banner} footer={mainPanel.footer} editing={editing}
-        cols={mainPanel.cols} currentIdx={currentIdx} unit={unit}
+        cols={mainPanel.cols} currentIdx={currentIdx}
       />
 
       <PlanPanel
         id="init" tone="init" title="Target awal" sub={awalSub} collapsible
-        cols={awalCols} currentIdx={currentIdx} unit={unit}
+        cols={awalCols} currentIdx={currentIdx}
       />
 
       <p className="tb-foot">
@@ -710,7 +710,7 @@ function AchBar({ r, tone }) {
 }
 
 // ── The year at a glance: achievement so far and the 12 months as bars ──
-function PlanHero({ year, T, P, I, IP, ytd, updates, lastUpdate, corrected, throughIdx, currentIdx, adjS, actS, initS, done, hasSpend, unit, setUnit }) {
+function PlanHero({ year, T, P, I, IP, ytd, updates, lastUpdate, corrected, throughIdx, currentIdx, adjS, actS, initS, done, hasSpend }) {
   const ach = ratio(ytd.actual, ytd.adj);
   const max = Math.max(1, ...adjS, ...actS.map((v) => v ?? 0), ...(updates > 0 ? initS.map((v) => v ?? 0) : []));
   const h = (v) => `${Math.max(((v ?? 0) / max) * 100, v ? 1.5 : 0)}%`;
@@ -730,10 +730,6 @@ function PlanHero({ year, T, P, I, IP, ytd, updates, lastUpdate, corrected, thro
               : ' · belum ada update'}
             {corrected ? ' · target awal dikoreksi' : ''}
           </p>
-        </div>
-        <div className="ph-unit">
-          <span>Angka tabel</span>
-          <Seg value={unit} options={[['jt', 'Juta'], ['full', 'Rupiah penuh']]} onChange={setUnit} label="Satuan angka tabel" />
         </div>
       </div>
 
@@ -928,10 +924,19 @@ function SplitCheck({ ed, T, P, saving, onSave, onCancel }) {
   );
 }
 
+// The unit a table's money is written in: whole rupiah, or millions.
+const UnitCtx = createContext('full');
+function Money({ v }) {
+  const unit = useContext(UnitCtx);
+  if (v == null || !Number.isFinite(v)) return '—';
+  return unit === 'jt' ? (v / 1e6).toLocaleString('id-ID', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) : Math.round(v).toLocaleString('id-ID');
+}
+const UnitLabel = () => (useContext(UnitCtx) === 'jt' ? 'Rp juta' : 'Rupiah');
+
 // ── One table: its header, then the months down the side ─────────────
 // Growth, daily figures and the like hide behind "Kolom detail"; a table
 // that is extra information can be folded away.
-function PlanPanel({ id, tone, title, sub, actions, banner, footer, editing, cols, currentIdx, futureFrom, unit, collapsible }) {
+function PlanPanel({ id, tone, title, sub, actions, banner, footer, editing, cols, currentIdx, futureFrom, collapsible }) {
   const [detail, setDetail] = useState(false);
   const [open, setOpen] = useState(true);
   const hidden = cols.filter((c) => c.detail).length;
@@ -962,7 +967,9 @@ function PlanPanel({ id, tone, title, sub, actions, banner, footer, editing, col
         <>
           {banner}
           <div className="ps-scroll">
-            <MonthTable cols={shown} detail={detail} currentIdx={currentIdx} futureFrom={futureFrom} unit={unit} />
+            <UnitCtx.Provider value={detail ? 'jt' : 'full'}>
+              <MonthTable cols={shown} detail={detail} currentIdx={currentIdx} futureFrom={futureFrom} unit={detail ? 'jt' : 'full'} />
+            </UnitCtx.Provider>
           </div>
           {footer}
         </>
@@ -1015,7 +1022,7 @@ function MonthTable({ cols, detail, currentIdx, futureFrom = 12, unit }) {
               <th scope="row" className="mt-month">
                 <span className="mt-idx">{String(i + 1).padStart(2, '0')}</span>
                 <b>{MONTH_LONG[i]}</b>
-                {i === currentIdx && <span className="mt-now">berjalan</span>}
+                {i === currentIdx && <span className="mt-now" title="Bulan berjalan" aria-label="bulan berjalan" />}
               </th>
               {cols.map((c, k) => <td key={c.id} className={`${colCls(c, k)}${c.tone ? ` ${c.tone(i)}` : ''}`}>{c.cell(i)}</td>)}
             </tr>

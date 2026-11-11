@@ -462,6 +462,7 @@
   position: relative; display: grid; gap: 10px;
   animation: pv-in .32s var(--at-ease) backwards;
 }
+.ps-sheet { container-type: inline-size; }
 .ps-sheet.is-act { --ps-tone: var(--c-act); }
 .ps-sheet.is-init { --ps-tone: #6f7c91; }
 @keyframes pv-in { from { opacity: 0; transform: translateY(6px); } }
@@ -502,7 +503,7 @@
 .at-plan table.mt { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .8rem; }
 .at-plan .mt th,
 .at-plan .mt td {
-  padding: var(--cp, 9px 11px); border: 0; border-bottom: 1px solid var(--cl, #eef1f5);
+  padding: var(--cp, 9px 9px); border: 0; border-bottom: 1px solid var(--cl, #eef1f5);
   color: var(--cc, var(--at-ink)); font-size: inherit; font-weight: var(--cw, 600);
   letter-spacing: -.005em; text-transform: none; text-align: right; white-space: nowrap; vertical-align: middle;
   font-variant-numeric: tabular-nums lining-nums; box-shadow: var(--cs, none);
@@ -515,17 +516,19 @@
 .at-plan .mt tbody tr:nth-child(even) td,
 .at-plan .mt tbody tr:hover th,
 .at-plan .mt tbody tr:hover td { background: var(--cb, #fff); }
-.at-plan .mt .mt-num { width: 1%; min-width: 74px; }
-.at-plan .mt .mt-viz { min-width: 96px; padding-right: 18px; text-align: left; }
-.at-plan .mt .mt-month { position: sticky; left: 0; z-index: 1; width: 1%; min-width: 128px; text-align: left; --cs: inset -1px 0 0 #eef1f5; }
+.at-plan .mt .mt-num { min-width: 64px; }
+.at-plan .mt:not(.is-jt) td.mt-num { font-size: .78rem; }
+.at-plan .mt .mt-viz { width: clamp(90px, calc(106cqw - 1004px), 300px); min-width: 90px; padding-right: 14px; text-align: left; }
+.at-plan .mt th.mt-month:first-child { padding-left: 14px; }
+.at-plan .mt .mt-month { position: sticky; left: 0; z-index: 1; width: 1%; min-width: 112px; text-align: left; --cs: inset -1px 0 0 #eef1f5; }
 .at-plan .mt .is-gstart { --cs: inset 1px 0 0 #eef1f5; }
 
 /* Heads: a bracket over each group, then the columns. */
-.mt-groups th { --cp: 11px 11px 0; border-bottom: 0 !important; text-align: left !important; }
+.mt-groups th { --cp: 11px 9px 0; border-bottom: 0 !important; text-align: left !important; }
 .mt-groups th:first-child { --cs: inset -1px 0 0 #eef1f5; }
 .mt-groups th span { display: block; padding-bottom: 6px; border-bottom: 1.5px solid color-mix(in srgb, var(--ps-tone) 40%, transparent); color: var(--ps-tone); font-size: .6rem; font-weight: 850; letter-spacing: .16em; text-transform: uppercase; }
 .mt-groups th.is-detail span { border-color: #dfe5ee; color: #8a96a9; }
-.mt-cols th { --cp: 8px 11px 9px; --cc: #6b788d; --cw: 800; --cl: #e2e7ef; font-size: .64rem; letter-spacing: .06em; text-transform: uppercase !important; vertical-align: bottom !important; }
+.mt-cols th { --cp: 8px 9px 9px; --cc: #6b788d; --cw: 800; --cl: #e2e7ef; font-size: .64rem; letter-spacing: .06em; text-transform: uppercase !important; vertical-align: bottom !important; }
 .ps-sheet.is-folded { gap: 0; }
 .mt-cols th small { display: block; margin-top: 2px; color: #9aa5b6; font-size: .62rem; font-weight: 600; letter-spacing: 0; text-transform: none; }
 .mt-cols th.is-key, .mt-cols th.mt-month { --cc: var(--at-ink); }
@@ -545,22 +548,23 @@
 .at-plan .mt tbody tr.mt-m:hover > td.is-input { --cb: #fff8e3; }
 .mt-m.is-now th, .mt-m.is-now td { --cb: color-mix(in srgb, var(--at-accent) 4.5%, #fff); }
 .mt-m.is-now th.mt-month { --cs: inset 2px 0 0 var(--at-accent), inset -1px 0 0 #eef1f5; }
-.mt-now { display: inline-flex; margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--at-accent) 12%, #fff); color: var(--at-accent); font-size: .6rem; font-weight: 850; letter-spacing: .04em; vertical-align: 1px; }
+.mt-now { display: inline-block; width: 6px; height: 6px; margin-left: 7px; border-radius: 50%; background: var(--at-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--at-accent) 18%, transparent); vertical-align: 2px; }
 .mt-m.is-future td { --cc: #a3aec0; }
 .mt-m.is-future th b { color: #7b879b; }
 
 /* Each quarter closes on its subtotal. */
-.mt-q th, .mt-q td { --cb: #f7f9fc; --cp: 8px 11px; --cl: #e2e7ef; --cw: 750; }
+.mt-q th, .mt-q td { --cb: #f7f9fc; --cp: 8px 9px; --cl: #e2e7ef; --cw: 750; }
 .mt-q td.is-input { --cb: #fff6dc; }
 .mt-qname { color: var(--ps-tone); font-size: .74rem; font-weight: 850; letter-spacing: .02em; }
 .mt-q th small, .mt-h th small { margin-left: 7px; color: #8a96a9; font-size: .7rem; font-weight: 650; }
 .mt-qv { display: inline-flex; flex-direction: row-reverse; align-items: center; gap: 7px; }
 .mt-qv b { font-weight: 800; }
+.mt-qgrowth { display: inline-flex; align-items: center; gap: 6px; color: #8a96a9; font-size: .68rem; font-weight: 700; }
 .mt-qv .pt-chip { font-size: .64rem; }
 
 /* The year: semesters in Detail, then the total under a double rule. */
-.mt-h th, .mt-h td { --cb: #fbfcfe; --cc: #4f5d73; --cp: 8px 11px; }
-.mt-total th, .mt-total td { --cb: #fff; --cw: 850; --cp: 12px 11px 13px; border-bottom: 0 !important; border-top: 3px double #9aa6b8; font-size: .86rem; }
+.mt-h th, .mt-h td { --cb: #fbfcfe; --cc: #4f5d73; --cp: 8px 9px; }
+.mt-total th, .mt-total td { --cb: #fff; --cw: 850; --cp: 12px 9px 13px; border-bottom: 0 !important; border-top: 3px double #9aa6b8; font-size: .86rem; }
 .mt-total td.is-input { --cb: #fff8e3; }
 
 /* Rows come in as the tab opens. */
@@ -589,7 +593,7 @@
 /* Achievement: figure over a thin meter. */
 .pt-ach { display: inline-grid; justify-items: end; gap: 3px; }
 .pt-ach b { font-weight: 800; }
-.pt-ach i { display: block; width: 40px; height: 4px; border-radius: 999px; background: #e9edf4; overflow: hidden; }
+.pt-ach i { display: block; width: 36px; height: 4px; border-radius: 999px; background: #e9edf4; overflow: hidden; }
 .pt-ach em { display: block; height: 100%; border-radius: inherit; background: #94a3b8; transform-origin: left; transition: transform .4s var(--at-ease); }
 .pt-ach.is-good b { color: var(--at-good); }
 .pt-ach.is-good em { background: linear-gradient(90deg, #34d399, #10b981); }
